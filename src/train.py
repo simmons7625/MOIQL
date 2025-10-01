@@ -3,6 +3,7 @@ import yaml
 import torch
 import torch.optim as optim
 import numpy as np
+import wandb
 from pathlib import Path
 from typing import Dict, Any
 
@@ -57,6 +58,13 @@ def collect_expert_demonstrations(env, n_episodes: int):
 def train_inverse_q_learning(config: Dict[str, Any]):
     """Main training loop for inverse Q-learning."""
 
+    wandb.init(
+        project=config.get("wandb_project", "moiql"),
+        name=config.get("wandb_run_name"),
+        config=config,
+        mode=config.get("wandb_mode", "online"),
+    )
+
     device = torch.device(
         config.get("device", "cuda" if torch.cuda.is_available() else "cpu")
     )
@@ -84,6 +92,12 @@ def train_inverse_q_learning(config: Dict[str, Any]):
         env, config.get("n_expert_episodes", 100)
     )
 
+    expert_total_rewards = []
+    for demo in demonstrations:
+        total_reward = sum(t["reward"] for t in demo)
+        expert_total_rewards.append(total_reward)
+    expert_mean_reward = np.mean(expert_total_rewards, axis=0)
+
     print("Starting training...")
     for epoch in range(config.get("n_epochs", 1000)):
         epoch_q_loss = 0.0
@@ -108,13 +122,33 @@ def train_inverse_q_learning(config: Dict[str, Any]):
 
                 epoch_q_loss += q_loss.item()
 
+        avg_loss = epoch_q_loss / len(demonstrations)
+
+        policy = MultiObjectivePolicy(q_network, epsilon=0.0)
+        mean_rewards, episode_rewards = evaluate_policy(
+            policy, env, n_episodes=config.get("eval_episodes", 10)
+        )
+
+        regret = expert_mean_reward - mean_rewards
+
+        wandb.log(
+            {
+                "epoch": epoch + 1,
+                "q_loss": avg_loss,
+                "reward_obj0": mean_rewards[0] if len(mean_rewards) > 0 else 0,
+                "reward_obj1": mean_rewards[1] if len(mean_rewards) > 1 else 0,
+                "regret_obj0": regret[0] if len(regret) > 0 else 0,
+                "regret_obj1": regret[1] if len(regret) > 1 else 0,
+                "total_reward": np.sum(mean_rewards),
+                "total_regret": np.sum(regret),
+            }
+        )
+
         if (epoch + 1) % config.get("log_interval", 100) == 0:
             print(f"Epoch {epoch + 1}/{config.get('n_epochs', 1000)}")
-            print(f"  Q-Loss: {epoch_q_loss / len(demonstrations):.4f}")
-
-            policy = MultiObjectivePolicy(q_network, epsilon=0.0)
-            mean_rewards, _ = evaluate_policy(policy, env, n_episodes=10)
+            print(f"  Q-Loss: {avg_loss:.4f}")
             print(f"  Mean Rewards: {mean_rewards}")
+            print(f"  Regret: {regret}")
 
     save_dir = Path(config.get("save_dir", "checkpoints"))
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -122,6 +156,8 @@ def train_inverse_q_learning(config: Dict[str, Any]):
     torch.save(q_network.state_dict(), save_dir / "q_network.pt")
 
     print(f"Models saved to {save_dir}")
+
+    wandb.finish()
 
     env.close()
 

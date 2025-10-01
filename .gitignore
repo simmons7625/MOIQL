@@ -1,0 +1,48 @@
+*.csv
+*.png
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Model checkpoints
+checkpoints/
+*.pt
+*.pth
+
+# Logs
+*.log
+logs/
+wandb/
+
+# Data
+data/
+*.pkl
+*.pickle
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,30 @@
+# Environment settings
+env_name: "deep_sea_treasure"
+env_kwargs: {}
+
+# Model architecture
+hidden_dim: 256
+n_hidden_layers: 2
+reward_hidden_dim: 128
+
+# Training hyperparameters
+n_epochs: 1000
+q_lr: 1e-3
+reward_lr: 1e-3
+margin: 1.0
+
+# Expert demonstrations
+n_expert_episodes: 100
+
+# Logging and evaluation
+log_interval: 100
+eval_episodes: 10
+
+# Weights & Biases settings
+wandb_project: "moiql"
+wandb_run_name: null
+wandb_mode: "online"
+
+# Save settings
+save_dir: "checkpoints"
+device: "cuda"
