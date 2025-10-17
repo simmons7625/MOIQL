@@ -1,0 +1,37 @@
+# Environment settings
+env_name: "deep_sea_treasure"
+env_kwargs: {}
+
+# Reward function settings - time-varying preference
+contenous_decay: 0.01  # Continuous decay rate for treasure weight
+switch_decay: 0.5  # Multiplicative decay when switching
+init_treasure_weight: 1.0  # Initial weight for treasure objective
+switch_time: null  # Time step to switch (null for no switching)
+
+# Model architecture
+hidden_dim: 256
+
+# PPO hyperparameters
+lr: 1.0e-4
+gamma: 0.99
+gae_lambda: 0.95
+clip_epsilon: 0.2
+vf_coef: 0.5
+ent_coef: 0.01
+max_grad_norm: 0.5
+
+# Training settings
+n_updates: 10000
+n_epochs: 10  # Epochs per update
+batch_size: 64
+
+wandb_project: "moiql-ppo"
+wandb_run_name: "ppo"
+use_wandb: false
+
+# Save settings
+save_dir: "ppo_results"
+save_interval: 1000  # Save every N updates
+
+# Device
+device: "cuda"  # cuda or cpu

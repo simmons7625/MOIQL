@@ -7,13 +7,13 @@ import wandb
 from pathlib import Path
 from typing import Dict, Any
 
-from environment import make_env
+from Env.highway import make_env
 from model import (
     MultiObjectiveQNetwork,
     InverseQLearningLoss,
     MultiObjectivePolicy,
 )
-from metrics import evaluate_policy
+from iql.metrics import evaluate_policy
 
 
 def load_config(config_path: str) -> Dict[str, Any]:
