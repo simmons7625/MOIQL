@@ -1,0 +1,7 @@
+deterministic: true
+device: cuda
+model_path: final_model.pt
+n_episodes: 100
+output_dir: simulation_results
+train_dir: ppo_results/results_20251019_161641/
+training_config: config.yaml

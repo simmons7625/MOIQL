@@ -1,0 +1,12 @@
+{
+  "n_episodes": 100,
+  "mean_return": 7.0800018310546875,
+  "std_return": 9.5367431640625e-07,
+  "min_return": 7.080000877380371,
+  "max_return": 7.080000877380371,
+  "mean_length": 5.0,
+  "std_length": 0.0,
+  "min_length": 5,
+  "max_length": 5,
+  "total_timesteps": 500
+}
