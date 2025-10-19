@@ -77,7 +77,6 @@ class PPOTrainer:
             )
         elif env_name == "mo-highway":
             preference_fn = HighwayPreferenceFunction(
-                contenous_decay=contenous_decay,
                 init_speed_weight=init_treasure_weight,
                 safety_distance_threshold=safety_distance_threshold,
                 safety_boost_factor=safety_boost_factor,

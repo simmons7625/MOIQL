@@ -33,24 +33,21 @@ class DSTPreferenceFunction:
 class HighwayPreferenceFunction:
     def __init__(
         self,
-        contenous_decay: float = 0.01,
         init_speed_weight: float = 1.0,
         safety_distance_threshold: float = 10.0,
         safety_boost_factor: float = 1.5,
     ):
-        self.contenous_decay = contenous_decay
         self.init_speed_weight = init_speed_weight
         self.safety_distance_threshold = safety_distance_threshold
         self.safety_boost_factor = safety_boost_factor
         self.last_weights = None
 
     def reset(self):
-        """Reset time step at episode start."""
-        self.time_step = 0
+        pass
 
     def __call__(self, nearest_distance: float = float("inf")) -> np.ndarray:
         """
-        Compute preference weights with continuous linear decay and distance-based safety switching.
+        Compute preference weights with distance-based safety switching.
 
         Args:
             nearest_distance: Distance to nearest car. If closer than threshold, boost safety weight.
@@ -59,11 +56,7 @@ class HighwayPreferenceFunction:
             Preference weights [speed_weight, safety_weight]
         """
         # Compute base speed weight with linear decay
-        base_speed_weight = max(
-            0.0, self.init_speed_weight - self.contenous_decay * self.time_step
-        )
-        self.time_step += 1
-
+        base_speed_weight = self.init_speed_weight
         # Base safety weight (complement of speed weight)
         base_safety_weight = 1.0 - base_speed_weight
 
