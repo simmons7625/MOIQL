@@ -1,0 +1,13 @@
+# Simulation configuration for trajectory collection
+# Model settings
+train_dir: "ppo_results/results_20251019_161641/"  # Path to trained model directory
+model_path: 'final_model.pt'  # Filename of the trained model
+training_config: "config.yaml"  # Path to training config (for environment setup)
+
+# Simulation settings
+n_episodes: 100  # Number of episodes to simulate
+deterministic: true  # Use deterministic policy (argmax) vs stochastic (sampling)
+device: "cuda"  # cuda or cpu
+
+# Output settings
+output_dir: "simulation_results"  # Directory to save trajectory data

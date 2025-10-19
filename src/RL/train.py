@@ -1,5 +1,6 @@
 import argparse
 import json
+import pandas as pd
 import warnings
 from datetime import datetime
 from pathlib import Path
@@ -50,11 +51,10 @@ def save_results(save_dir: str, config: dict, final_metrics: dict, trainer: PPOT
         yaml.dump(config, f, default_flow_style=False)
     print(f"Saved config to {config_path}")
 
-    # Save final metrics
-    metrics_path = results_dir / "final_metrics.json"
-    with open(metrics_path, "w") as f:
-        json.dump(final_metrics, f, indent=2)
-    print(f"Saved metrics to {metrics_path}")
+    # Save final metrics as csv
+    metrics_path = results_dir / "metrics.csv"
+    pd.DataFrame(final_metrics).to_csv(metrics_path, index=False)
+    print(f"Saved final metrics to {metrics_path}")
 
     # Save final model
     model_path = results_dir / "final_model.pt"
@@ -75,28 +75,9 @@ def save_results(save_dir: str, config: dict, final_metrics: dict, trainer: PPOT
         json.dump(model_info, f, indent=2)
     print(f"Saved model info to {model_info_path}")
 
-    # Create summary file
-    summary_path = results_dir / "summary.txt"
-    with open(summary_path, "w") as f:
-        f.write("=" * 70 + "\n")
-        f.write("PPO TRAINING SUMMARY\n")
-        f.write("=" * 70 + "\n\n")
-
-        f.write(f"Timestamp: {timestamp}\n")
-        f.write(f"Environment: {config['env_name']}\n")
-        f.write(f"Continuous decay: {config['contenous_decay']}\n")
-        f.write(f"Switch decay: {config['switch_decay']}\n")
-        f.write(f"Init treasure weight: {config['init_treasure_weight']}\n")
-        f.write(f"Switch time: {config.get('switch_time', 'None')}\n\n")
-
-        f.write("Final Metrics:\n")
-        for key, value in final_metrics.items():
-            f.write(f"  {key}: {value}\n")
-
-        f.write("\n" + "=" * 70 + "\n")
-
-    print(f"Saved summary to {summary_path}")
-    print(f"\nAll results saved to: {results_dir}")
+    # plot preference weights
+    trainer.plot_preference_weights(save_path=results_dir / "preference_weights.png")
+    print(f"Saved preference weights plot to {results_dir / 'preference_weights.png'}")
 
     return results_dir
 
@@ -129,12 +110,18 @@ def main():
 
     # Create trainer
     print("\nInitializing PPO trainer...")
+
+    # Handle init_weight - can be a list or scalar
+    init_weight = config["init_weight"]
+    if isinstance(init_weight, list):
+        init_weight = init_weight[0]  # Use first element for initial weight
+
     trainer = PPOTrainer(
         env_name=config["env_name"],
         contenous_decay=config["contenous_decay"],
-        switch_decay=config["switch_decay"],
-        init_treasure_weight=config["init_treasure_weight"],
-        switch_time=config.get("switch_time", None),
+        init_treasure_weight=init_weight,
+        safety_distance_threshold=config.get("safety_distance_threshold", 10.0),
+        safety_boost_factor=config.get("safety_boost_factor", 1.5),
         hidden_dim=config["hidden_dim"],
         lr=config["lr"],
         gamma=config["gamma"],

@@ -39,6 +39,7 @@ class DeepSeaTreasureWrapper(gym.Wrapper):
         # Apply reward function if provided
         if self.reward_fn:
             scalar_reward = self.reward_fn(mo_reward)
+            info["preference_weights"] = self.reward_fn.preference_fn.last_weights
             return obs, scalar_reward, terminated, truncated, info
 
         return obs, mo_reward, terminated, truncated, info
