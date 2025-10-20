@@ -7,6 +7,7 @@ from typing import Dict
 from pathlib import Path
 import wandb
 from tqdm import tqdm
+import csv
 
 import mo_gymnasium as gym
 from src.Env.highway import HighwayWrapper
@@ -137,8 +138,14 @@ class PPOTrainer:
         self.reward_fn = reward_fn
 
     def collect_rollout(self) -> Dict:
-        """Collect rollout data - collects exactly one episode."""
+        """Collect rollout data - collects multiple episodes and returns mean/std statistics."""
         self.buffer.clear()
+
+        # Track statistics across all episodes
+        all_episode_rewards = []
+        all_episode_mo_rewards = []
+        all_episode_lengths = []
+
         for i in range(self.n_rollouts_per_update):
             episode_reward = 0
             episode_mo_reward = np.array([0.0, 0.0], dtype=np.float32)
@@ -188,11 +195,29 @@ class PPOTrainer:
                 if done:
                     break
 
-        # Return single episode statistics
+            # Store episode statistics
+            all_episode_rewards.append(episode_reward)
+            all_episode_mo_rewards.append(episode_mo_reward)
+            all_episode_lengths.append(episode_step)
+
+        # Compute mean and std statistics
+        mean_reward = np.mean(all_episode_rewards)
+        std_reward = np.std(all_episode_rewards)
+        mean_length = np.mean(all_episode_lengths)
+        std_length = np.std(all_episode_lengths)
+
+        # Compute mean and std for multi-objective rewards
+        mean_mo_rewards = np.mean(all_episode_mo_rewards, axis=0)
+        std_mo_rewards = np.std(all_episode_mo_rewards, axis=0)
+
+        # Return episode statistics with mean and std
         return {
-            "episode_reward": episode_reward,
-            "episode_mo_rewards": episode_mo_reward,
-            "episode_length": episode_step,
+            "episode_reward": mean_reward,
+            "episode_reward_std": std_reward,
+            "episode_mo_rewards": mean_mo_rewards,
+            "episode_mo_rewards_std": std_mo_rewards,
+            "episode_length": mean_length,
+            "episode_length_std": std_length,
         }
 
     def compute_gae(self, rewards, values, dones, next_value):
@@ -299,14 +324,25 @@ class PPOTrainer:
     def train(
         self,
         n_updates: int = 1000,
+        save_dir: str = None,
     ) -> Dict:
         """Train the agent."""
         global_step = 0
 
-        # Track metrics for final report
+        # Track metrics for final report and CSV export
         all_episode_rewards = []
+        all_episode_rewards_std = []
+        all_episode_lengths = []
+        all_episode_lengths_std = []
+        all_mo_rewards_obj1 = []
+        all_mo_rewards_obj1_std = []
+        all_mo_rewards_obj2 = []
+        all_mo_rewards_obj2_std = []
         all_policy_losses = []
         all_value_losses = []
+        all_entropy = []
+        all_updates = []
+        all_global_steps = []
 
         # Create progress bar
         pbar = tqdm(range(n_updates), desc="Training")
@@ -318,12 +354,30 @@ class PPOTrainer:
             # Update policy
             update_info = self.update()
 
-            global_step += rollout_info["episode_length"]
+            global_step += int(rollout_info["episode_length"])
 
             # Track metrics
+            all_updates.append(update)
+            all_global_steps.append(global_step)
             all_policy_losses.append(update_info["policy_loss"])
             all_value_losses.append(update_info["value_loss"])
+            all_entropy.append(update_info["entropy"])
             all_episode_rewards.append(rollout_info["episode_reward"])
+            all_episode_rewards_std.append(rollout_info["episode_reward_std"])
+            all_episode_lengths.append(rollout_info["episode_length"])
+            all_episode_lengths_std.append(rollout_info["episode_length_std"])
+
+            # Track multi-objective rewards
+            if rollout_info["episode_mo_rewards"] is not None:
+                all_mo_rewards_obj1.append(rollout_info["episode_mo_rewards"][0])
+                all_mo_rewards_obj1_std.append(
+                    rollout_info["episode_mo_rewards_std"][0]
+                )
+                all_mo_rewards_obj2.append(rollout_info["episode_mo_rewards"][1])
+                all_mo_rewards_obj2_std.append(
+                    rollout_info["episode_mo_rewards_std"][1]
+                )
+
             self.timesteps_history.append(global_step)
 
             # Logging
@@ -333,20 +387,89 @@ class PPOTrainer:
                 "train/value_loss": update_info["value_loss"],
                 "train/entropy": update_info["entropy"],
                 "train/episode_reward": rollout_info["episode_reward"],
+                "train/episode_reward_std": rollout_info["episode_reward_std"],
                 "train/episode_length": rollout_info["episode_length"],
+                "train/episode_length_std": rollout_info["episode_length_std"],
             }
 
             # Log multi-objective rewards if available
             if rollout_info["episode_mo_rewards"] is not None:
                 mo_rewards = rollout_info["episode_mo_rewards"]
+                mo_rewards_std = rollout_info["episode_mo_rewards_std"]
                 log_dict["train/mo_reward_treasure"] = mo_rewards[0]
+                log_dict["train/mo_reward_treasure_std"] = mo_rewards_std[0]
                 log_dict["train/mo_reward_time"] = mo_rewards[1]
+                log_dict["train/mo_reward_time_std"] = mo_rewards_std[1]
 
             if self.use_wandb:
                 wandb.log(log_dict, step=global_step)
 
         # Close progress bar
         pbar.close()
+
+        # Save metrics to CSV if save_dir is provided
+        if save_dir is not None:
+            save_path = Path(save_dir)
+            save_path.mkdir(parents=True, exist_ok=True)
+            csv_path = save_path / "metrics.csv"
+
+            with open(csv_path, "w", newline="") as f:
+                writer = csv.writer(f)
+
+                # Write header
+                header = [
+                    "update",
+                    "global_step",
+                    "policy_loss",
+                    "value_loss",
+                    "entropy",
+                    "episode_reward",
+                    "episode_reward_std",
+                    "episode_length",
+                    "episode_length_std",
+                ]
+
+                # Add multi-objective columns if available
+                if len(all_mo_rewards_obj1) > 0:
+                    header.extend(
+                        [
+                            "mo_reward_obj1",
+                            "mo_reward_obj1_std",
+                            "mo_reward_obj2",
+                            "mo_reward_obj2_std",
+                        ]
+                    )
+
+                writer.writerow(header)
+
+                # Write data rows
+                for i in range(len(all_updates)):
+                    row = [
+                        all_updates[i],
+                        all_global_steps[i],
+                        all_policy_losses[i],
+                        all_value_losses[i],
+                        all_entropy[i],
+                        all_episode_rewards[i],
+                        all_episode_rewards_std[i],
+                        all_episode_lengths[i],
+                        all_episode_lengths_std[i],
+                    ]
+
+                    # Add multi-objective data if available
+                    if len(all_mo_rewards_obj1) > 0:
+                        row.extend(
+                            [
+                                all_mo_rewards_obj1[i],
+                                all_mo_rewards_obj1_std[i],
+                                all_mo_rewards_obj2[i],
+                                all_mo_rewards_obj2_std[i],
+                            ]
+                        )
+
+                    writer.writerow(row)
+
+            print(f"Metrics saved to {csv_path}")
 
         # Return final metrics
         final_metrics = {
@@ -359,17 +482,42 @@ class PPOTrainer:
 
     def plot_preference_weights(self, save_path: str):
         """Plot preference weights over one episode"""
+        state, _ = self.env.reset()
         self.reward_fn.reset()
-        timesteps = np.arange(100)
+        timesteps = []
         episode_weights = []
 
-        for t in timesteps:
-            weights = self.reward_fn.preference_fn()
-            episode_weights.append(weights)
-        episode_weights = np.array(episode_weights)
+        with torch.no_grad():
+            t = 0
+            while True:
+                # Flatten state if multi-dimensional
+                state_flat = state.flatten() if len(state.shape) > 1 else state
+                state_t = torch.FloatTensor(state_flat).unsqueeze(0).to(self.device)
+
+                with torch.no_grad():
+                    logits, value = self.ac.act(state_t)
+                    dist = Categorical(logits=logits)
+                    action = dist.sample()
+
+                next_state, reward, terminated, truncated, info = self.env.step(
+                    action.item()
+                )
+                done = terminated or truncated
+                weights = self.reward_fn.preference_fn()
+                episode_weights.append(weights)
+                timesteps.append(t)
+
+                state = next_state
+                t += 1
+
+                if done:
+                    break
 
         # plot using matlotlib
         import matplotlib.pyplot as plt
+
+        episode_weights = np.array(episode_weights)
+        timesteps = np.array(timesteps)
 
         plt.figure()
         plt.plot(timesteps, episode_weights[:, 0], label="Objective 1 Weight")

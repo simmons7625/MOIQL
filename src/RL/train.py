@@ -1,6 +1,5 @@
 import argparse
 import json
-import pandas as pd
 import warnings
 from datetime import datetime
 from pathlib import Path
@@ -27,34 +26,23 @@ def load_config(config_path: str) -> dict:
     return config
 
 
-def save_results(save_dir: str, config: dict, final_metrics: dict, trainer: PPOTrainer):
+def save_results(results_dir: str, config: dict, trainer: PPOTrainer):
     """
-    Save training results including config, metrics, and final model.
+    Save training results including config and final model.
+    Note: Metrics CSV is already saved during training.
 
     Args:
-        save_dir: Directory to save results
+        results_dir: Directory to save results (already created with timestamp)
         config: Training configuration
-        final_metrics: Final training metrics
         trainer: Trained PPOTrainer instance
     """
-    save_path = Path(save_dir)
-    save_path.mkdir(parents=True, exist_ok=True)
-
-    # Create results subdirectory with timestamp
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    results_dir = save_path / f"results_{timestamp}"
-    results_dir.mkdir(parents=True, exist_ok=True)
+    results_dir = Path(results_dir)
 
     # Save configuration
     config_path = results_dir / "config.yaml"
     with open(config_path, "w") as f:
         yaml.dump(config, f, default_flow_style=False)
     print(f"Saved config to {config_path}")
-
-    # Save final metrics as csv
-    metrics_path = results_dir / "metrics.csv"
-    pd.DataFrame(final_metrics).to_csv(metrics_path, index=False)
-    print(f"Saved final metrics to {metrics_path}")
 
     # Save final model
     model_path = results_dir / "final_model.pt"
@@ -144,8 +132,14 @@ def main():
     print("STARTING TRAINING")
     print("=" * 70)
 
-    final_metrics = trainer.train(
+    # Create results directory with timestamp
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    results_dir = Path(config["save_dir"]) / timestamp
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    trainer.train(
         n_updates=config["n_updates"],
+        save_dir=str(results_dir),
     )
 
     print("\n" + "=" * 70)
@@ -154,10 +148,9 @@ def main():
 
     # Save results
     print("\nSaving results...")
-    results_dir = save_results(
-        save_dir=config["save_dir"],
+    save_results(
+        results_dir=str(results_dir),
         config=config,
-        final_metrics=final_metrics,
         trainer=trainer,
     )
 
