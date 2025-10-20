@@ -26,23 +26,16 @@ def load_config(config_path: str) -> dict:
     return config
 
 
-def save_results(results_dir: str, config: dict, trainer: PPOTrainer):
+def save_results(results_dir: str, trainer: PPOTrainer):
     """
-    Save training results including config and final model.
-    Note: Metrics CSV is already saved during training.
+    Save training results including final model.
+    Note: Config is saved before training, metrics CSV is saved during training.
 
     Args:
         results_dir: Directory to save results (already created with timestamp)
-        config: Training configuration
         trainer: Trained PPOTrainer instance
     """
     results_dir = Path(results_dir)
-
-    # Save configuration
-    config_path = results_dir / "config.yaml"
-    with open(config_path, "w") as f:
-        yaml.dump(config, f, default_flow_style=False)
-    print(f"Saved config to {config_path}")
 
     # Save final model
     model_path = results_dir / "final_model.pt"
@@ -127,15 +120,21 @@ def main():
     print(f"Device: {trainer.device}")
     print(f"Model parameters: {sum(p.numel() for p in trainer.ac.parameters())}")
 
-    # Train
-    print("\n" + "=" * 70)
-    print("STARTING TRAINING")
-    print("=" * 70)
-
     # Create results directory with timestamp
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     results_dir = Path(config["save_dir"]) / timestamp
     results_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save configuration before training
+    config_path = results_dir / "config.yaml"
+    with open(config_path, "w") as f:
+        yaml.dump(config, f, default_flow_style=False)
+    print(f"Saved config to {config_path}")
+
+    # Train
+    print("\n" + "=" * 70)
+    print("STARTING TRAINING")
+    print("=" * 70)
 
     trainer.train(
         n_updates=config["n_updates"],
@@ -150,7 +149,6 @@ def main():
     print("\nSaving results...")
     save_results(
         results_dir=str(results_dir),
-        config=config,
         trainer=trainer,
     )
 
