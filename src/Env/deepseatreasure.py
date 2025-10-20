@@ -3,6 +3,19 @@ import numpy as np
 from typing import Tuple, Optional
 from .reward_function import RewardFunction
 
+TREASURE_VALUES = [
+    [0.3, 0.5, 0.8],
+    [3, 5, 8],
+    [6, 10, 12],
+    [13, 14, 16],
+    [14, 15, 17],
+    [16, 17, 18],
+    [20, 25, 28],
+    [24, 26, 29],
+    [30, 32, 34],
+    [35, 36, 38],
+]
+
 
 class DeepSeaTreasureWrapper(gym.Wrapper):
     """Wrapper for Deep Sea Treasure environment with multi-objective rewards."""
@@ -12,6 +25,21 @@ class DeepSeaTreasureWrapper(gym.Wrapper):
         self.n_objectives = 2
         self.reward_fn = reward_fn
         self.return_scalar_reward = reward_fn is not None
+
+        # Initialize environment map (randomly select dimension in each treasure)
+        # Access the unwrapped environment to modify sea_map
+        unwrapped_env = self.env.unwrapped
+        treasure_values = np.random.randint(3, size=10)
+        unwrapped_env.sea_map[1, 0] = TREASURE_VALUES[0][treasure_values[0]]
+        unwrapped_env.sea_map[2, 1] = TREASURE_VALUES[1][treasure_values[1]]
+        unwrapped_env.sea_map[3, 2] = TREASURE_VALUES[2][treasure_values[2]]
+        unwrapped_env.sea_map[4, 3] = TREASURE_VALUES[3][treasure_values[3]]
+        unwrapped_env.sea_map[4, 4] = TREASURE_VALUES[4][treasure_values[4]]
+        unwrapped_env.sea_map[4, 5] = TREASURE_VALUES[5][treasure_values[5]]
+        unwrapped_env.sea_map[7, 6] = TREASURE_VALUES[6][treasure_values[6]]
+        unwrapped_env.sea_map[7, 7] = TREASURE_VALUES[7][treasure_values[7]]
+        unwrapped_env.sea_map[9, 8] = TREASURE_VALUES[8][treasure_values[8]]
+        unwrapped_env.sea_map[10, 9] = TREASURE_VALUES[9][treasure_values[9]]
 
         # Fix observation space dtype to float32 if needed
         if hasattr(self.observation_space, "dtype"):
