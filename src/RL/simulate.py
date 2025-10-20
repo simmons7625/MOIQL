@@ -62,7 +62,6 @@ def create_environment(
         )
     elif env_name == "mo-highway":
         preference_fn = HighwayPreferenceFunction(
-            contenous_decay=contenous_decay,
             init_speed_weight=init_weight,
             safety_distance_threshold=safety_distance_threshold,
             safety_boost_factor=safety_boost_factor,
@@ -238,7 +237,7 @@ def simulate(config: dict):
     save_path.mkdir(parents=True, exist_ok=True)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_path = save_path / f"simulation_{timestamp}"
+    output_path = save_path / f"{timestamp}"
     output_path.mkdir(parents=True, exist_ok=True)
 
     # Collect trajectories

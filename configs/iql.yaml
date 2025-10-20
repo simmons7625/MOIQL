@@ -1,30 +1,21 @@
 # Configuration for Objective-Dimensional Soft Inverse Q-Learning (OD-SQIL)
-
-# Environment settings
-env_name: "mo-highway"  # "deep_sea_treasure" or "mo-highway"
+# Data collection
+expert_dir: "simulation_results/20251020_171709"  # Directory containing config.yaml and trajectories.json
+# Number of trajectories to use from the expert dataset
+n_trajectories: 100 # Options: 10, 50, 100
 
 # Network architecture
 hidden_dim: 256
-obs_dim: 25  # 25 for mo-highway (5x5 flattened), 11x11=121 for deep_sea_treasure
-action_dim: 5  # 5 for mo-highway, 4 for deep_sea_treasure
-n_objectives: 2  # Number of objectives in multi-objective reward
 
 # IQL hyperparameters
-lr: 0.0003  # Learning rate
+lr: 1.0e-4  # Learning rate
 gamma: 0.99  # Discount factor
-tau: 0.005  # Soft update coefficient for target network
-alpha: 0.2  # Temperature parameter for soft Q-learning
 mismatch_coef: 1.0  # Coefficient for mismatch regularization term
+tau: 0.7  # Expectile parameter for value function update
 
 # Training settings
-batch_size: 256  # Batch size for updates
+batch_size: 16  # Batch size for updates
 n_updates: 10000  # Total number of training updates
-replay_buffer_size: 100000  # Size of replay buffer for storing transitions
-expert_buffer_size: 50000  # Size of buffer for expert demonstrations
-expert_ratio: 0.5  # Ratio of expert samples in each batch (0.0 to 1.0)
-
-# Data collection
-expert_trajectories_path: "simulation_results/trajectories.json"  # Path to expert demonstrations
 
 # State Space Model (SSM) settings
 ssm_type: "particle_filter"  # Options: "particle_filter", "ekf", "neural_ssm"
@@ -61,13 +52,10 @@ safety_boost_factor: 1.5  # Factor to boost safety weight when close to cars
 device: "cuda"  # "cuda" or "cpu"
 
 # Logging and saving
-use_wandb: true
+use_wandb: false
 wandb_project: "MOIQL"
-wandb_run_name: "odsqil_highway"
-save_dir: "iql_results"
-save_interval: 1000  # Save model every N updates
-log_interval: 100  # Log metrics every N updates
+save_dir: "moiql_results"
 
 # Evaluation settings
-eval_interval: 500  # Evaluate every N updates
+eval_interval: 100  # Evaluate every N updates
 eval_episodes: 10  # Number of episodes for evaluation

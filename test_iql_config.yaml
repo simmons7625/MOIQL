@@ -1,0 +1,20 @@
+# Temporary test config with fewer updates
+expert_dir: "simulation_results/20251020_171709"
+n_trajectories: 100
+batch_size: 16
+n_updates: 200  # Reduced from 10000
+lr: 0.0003
+gamma: 0.99
+hidden_dim: 128
+alpha: 1.0
+mismatch_coef: 0.1
+ssm_type: "particle_filter"
+particle_filter:
+  n_particles: 1000
+  process_noise: 0.01
+  observation_noise: 0.1
+eval_interval: 100
+eval_episodes: 5
+save_dir: "moiql_results"
+use_wandb: false
+device: "cuda"

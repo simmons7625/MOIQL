@@ -30,32 +30,41 @@ from typing import Optional, Callable
 from abc import ABC, abstractmethod
 
 
-def compute_mismatch(
-    preference: np.ndarray, q_expert: np.ndarray, eps: float = 1e-8
-) -> float:
+def compute_mismatch(preference, q_expert, eps: float = 1e-8):
     """
     Compute mismatch function between normalized preference and expert Q-values.
 
     mismatch = ||preference/|preference| - q_expert/|q_expert|||^2
 
     Args:
-        preference: Preference weights [n_objectives]
-        q_expert: Expert Q-values [n_objectives]
+        preference: Preference weights [n_objectives] (torch.Tensor or np.ndarray)
+        q_expert: Expert Q-values [n_objectives] (torch.Tensor or np.ndarray)
         eps: Small constant to avoid division by zero
 
     Returns:
-        Mismatch value (scalar)
+        Mismatch value (scalar, same type as input)
     """
-    # Normalize preference
-    preference_norm = np.linalg.norm(preference) + eps
-    preference_normalized = preference / preference_norm
+    # Handle both torch tensors and numpy arrays
+    if isinstance(preference, torch.Tensor):
+        # PyTorch implementation
+        preference_norm = torch.norm(preference, dim=-1, keepdim=True) + eps
+        preference_normalized = preference / preference_norm
 
-    # Normalize expert Q-values
-    q_expert_norm = np.linalg.norm(q_expert) + eps
-    q_expert_normalized = q_expert / q_expert_norm
+        q_expert_norm = torch.norm(q_expert, dim=-1, keepdim=True) + eps
+        q_expert_normalized = q_expert / q_expert_norm
 
-    # Compute squared L2 distance
-    mismatch = np.sum((preference_normalized - q_expert_normalized) ** 2)
+        # Compute squared L2 distance
+        mismatch = torch.sum((preference_normalized - q_expert_normalized) ** 2, dim=-1)
+    else:
+        # NumPy implementation
+        preference_norm = np.linalg.norm(preference, axis=-1, keepdims=True) + eps
+        preference_normalized = preference / preference_norm
+
+        q_expert_norm = np.linalg.norm(q_expert, axis=-1, keepdims=True) + eps
+        q_expert_normalized = q_expert / q_expert_norm
+
+        # Compute squared L2 distance
+        mismatch = np.sum((preference_normalized - q_expert_normalized) ** 2, axis=-1)
 
     return mismatch
 

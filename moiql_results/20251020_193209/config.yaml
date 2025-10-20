@@ -1,0 +1,36 @@
+batch_size: 16
+contenous_decay: 0.01
+device: cuda
+ekf:
+  initial_covariance: 1.0
+  observation_noise: 0.1
+  process_noise: 0.01
+eval_episodes: 10
+eval_interval: 100
+expert_dir: simulation_results/20251020_171709
+gamma: 0.99
+hidden_dim: 256
+init_weight:
+- 0.8
+- 0.2
+lr: 0.0001
+mismatch_coef: 1.0
+n_trajectories: 100
+n_updates: 10000
+neural_ssm:
+  hidden_dim: 64
+  learning_rate: 0.001
+  observation_noise: 0.1
+  process_noise: 0.01
+particle_filter:
+  initial_noise: 0.5
+  n_particles: 1000
+  observation_noise: 0.1
+  process_noise: 0.01
+safety_boost_factor: 1.5
+safety_distance_threshold: 10.0
+save_dir: moiql_results
+ssm_type: particle_filter
+tau: 0.7
+use_wandb: false
+wandb_project: MOIQL

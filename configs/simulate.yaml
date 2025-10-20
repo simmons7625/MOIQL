@@ -1,6 +1,6 @@
 # Simulation configuration for trajectory collection
 # Model settings
-train_dir: "ppo_results/results_20251019_161641/"  # Path to trained model directory
+train_dir: "ppo_results/20251020_145919/"  # Path to trained model directory
 model_path: 'final_model.pt'  # Filename of the trained model
 training_config: "config.yaml"  # Path to training config (for environment setup)
 

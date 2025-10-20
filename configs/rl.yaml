@@ -1,14 +1,14 @@
 # Environment settings
-env_name: "mo-highway" # Options: "deep_sea_treasure", "mo-highway"
+env_name: "deep_sea_treasure" # Options: "deep_sea_treasure", "mo-highway"
 env_kwargs: {}
 
 # Reward function settings - time-varying preference
-contenous_decay: 0.02  # Continuous linear decay rate for treasure weight not used in highway
+contenous_decay: 0.01  # Continuous linear decay rate for treasure weight not used in highway
 init_weight: [0.8, 0.2]  # Initial weight for [treasure/speed] or [time/safety]
 
 # Highway-specific settings (only used when env_name is "highway")
-safety_distance_threshold: 10.0  # Distance threshold for safety switching
-safety_boost_factor: 1.5  # Factor to boost safety weight when close to cars
+safety_distance_threshold: 5.0  # Distance threshold for safety switching
+safety_boost_factor: 2.0  # Factor to boost safety weight when close to cars
 
 # Model architecture
 hidden_dim: 256
@@ -17,14 +17,14 @@ hidden_dim: 256
 lr: 1.0e-4
 gamma: 0.99
 gae_lambda: 0.95
-clip_epsilon: 0.2
+clip_epsilon: 0.1
 vf_coef: 0.5
 ent_coef: 0.01
 max_grad_norm: 0.5
 
 # Training settings
 n_updates: 1000
-n_rollouts_per_update: 10
+n_rollouts_per_update: 1000
 n_epochs: 5  # Epochs per update
 batch_size: 64
 

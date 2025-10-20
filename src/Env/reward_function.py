@@ -17,9 +17,10 @@ class DSTPreferenceFunction:
         self.time_step = 0
 
     def __call__(self) -> np.ndarray:
-        """Compute preference weights with continuous linear decay."""
+        """Compute preference weights with continuous decay."""
         self.treasure_weight = max(
-            0.0, self.init_treasure_weight - self.contenous_decay * self.time_step
+            0.0,
+            self.init_treasure_weight * np.exp(-self.contenous_decay * self.time_step),
         )
         self.time_step += 1
 
