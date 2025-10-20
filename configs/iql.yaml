@@ -1,8 +1,9 @@
 # Configuration for Objective-Dimensional Soft Inverse Q-Learning (OD-SQIL)
 # Data collection
-expert_dir: "simulation_results/20251020_171709"  # Directory containing config.yaml and trajectories.json
+expert_dir: "simulation_results/20251020_201002"  # Directory containing config.yaml and trajectories.json
 # Number of trajectories to use from the expert dataset
-n_trajectories: 100 # Options: 10, 50, 100
+n_trajectories: 10
+# Experiment options: 10, 50, 100
 
 # Network architecture
 hidden_dim: 256
@@ -10,15 +11,16 @@ hidden_dim: 256
 # IQL hyperparameters
 lr: 1.0e-4  # Learning rate
 gamma: 0.99  # Discount factor
-mismatch_coef: 1.0  # Coefficient for mismatch regularization term
-tau: 0.7  # Expectile parameter for value function update
+mismatch_coef: .0  # Coefficient for mismatch regularization term
+tau: 0.005  # Expectile parameter for value function update
 
 # Training settings
-batch_size: 16  # Batch size for updates
-n_updates: 10000  # Total number of training updates
+batch_size: 1  # Batch size for updates
+n_updates: 1000  # Total number of training updates
+n_rollouts_per_update: 100  # Number of self-generated steps for actor update
 
 # State Space Model (SSM) settings
-ssm_type: "particle_filter"  # Options: "particle_filter", "ekf", "neural_ssm"
+ssm_type: "pf"  # Options: "pf", "ekf", "neural"
 
 # Particle Filter settings (used if ssm_type == "particle_filter")
 particle_filter:

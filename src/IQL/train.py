@@ -19,6 +19,7 @@ import numpy as np
 import torch
 import wandb
 import yaml
+from tqdm import tqdm
 
 import mo_gymnasium as gym
 from src.Env.deepseatreasure import DeepSeaTreasureWrapper
@@ -182,9 +183,24 @@ def create_environment(env_name: str, expert_config: Dict[str, Any]):
 
 def create_ssm(config: Dict[str, Any], n_objectives: int) -> StateSpaceModel:
     """Create State Space Model for preference prediction."""
-    ssm_type = config.get("ssm_type", "particle_filter")
+    ssm_type = config.get("ssm_type", "pf")
 
-    if ssm_type == "particle_filter":
+    # Map short names to full names for backward compatibility
+    type_mapping = {
+        "pf": "particle_filter",
+        "particle_filter": "particle_filter",
+        "ekf": "extended_kalman_filter",
+        "extended_kalman_filter": "extended_kalman_filter",
+        "neural": "neural_ssm",
+        "neural_ssm": "neural_ssm",
+    }
+
+    if ssm_type not in type_mapping:
+        raise ValueError(f"Unsupported SSM type: {ssm_type}. Options: pf, ekf, neural")
+
+    full_type = type_mapping[ssm_type]
+
+    if full_type == "particle_filter":
         pf_config = config.get("particle_filter", {})
         ssm = ParticleFilter(
             n_objectives=n_objectives,
@@ -193,7 +209,7 @@ def create_ssm(config: Dict[str, Any], n_objectives: int) -> StateSpaceModel:
             observation_noise=pf_config.get("observation_noise", 0.1),
         )
     else:
-        raise ValueError(f"Unsupported SSM type: {ssm_type}")
+        raise ValueError(f"SSM type '{full_type}' not yet implemented")
 
     return ssm
 
@@ -300,8 +316,8 @@ def evaluate_policy(
                 # Get predicted preference from SSM
                 pred_pref = trainer.ssm.predict(obs, action)
 
-                # Compute MSE
-                pref_error = np.mean((pred_pref - true_pref) ** 2)
+                # Compute MAE
+                pref_error = np.mean(np.abs(pred_pref - true_pref))
                 preference_errors.append(pref_error)
 
             obs = next_obs if len(next_obs.shape) == 1 else next_obs.flatten()
@@ -318,86 +334,10 @@ def evaluate_policy(
     }
 
     if len(preference_errors) > 0:
-        results["mean_preference_mse"] = np.mean(preference_errors)
-        results["std_preference_mse"] = np.std(preference_errors)
+        results["mean_preference_mae"] = np.mean(preference_errors)
+        results["std_preference_mae"] = np.std(preference_errors)
 
     return results
-
-
-def compute_preference_accuracy(
-    trainer: ODSQILTrainer,
-    expert_data: Dict[str, np.ndarray],
-    expert_config: Dict[str, Any],
-    n_samples: int = 100,
-) -> Dict[str, float]:
-    """
-    Compute preference prediction accuracy on expert data.
-
-    Args:
-        trainer: Trained IQL agent
-        expert_data: Expert trajectories
-        expert_config: Expert configuration with true preference info
-        n_samples: Number of samples to evaluate
-
-    Returns:
-        Dictionary with preference accuracy metrics
-    """
-    # Sample random transitions
-    n_data = len(expert_data["states"])
-    indices = np.random.choice(n_data, min(n_samples, n_data), replace=False)
-
-    # Get true preferences from expert config
-    # Reconstruct preference function to get ground truth
-    env_name = expert_config["env_name"]
-
-    if env_name == "deep_sea_treasure":
-        preference_fn = DSTPreferenceFunction(
-            contenous_decay=expert_config.get("contenous_decay", 0.01),
-            init_treasure_weight=expert_config.get("init_weight", [0.8, 0.2])[0],
-        )
-    elif env_name == "mo-highway":
-        preference_fn = HighwayPreferenceFunction(
-            init_speed_weight=expert_config.get("init_weight", [0.8, 0.2])[0],
-            safety_distance_threshold=expert_config.get(
-                "safety_distance_threshold", 10.0
-            ),
-            safety_boost_factor=expert_config.get("safety_boost_factor", 1.5),
-        )
-    else:
-        return {"preference_mse": 0.0, "preference_mae": 0.0}
-
-    # Compute errors
-    mse_errors = []
-    mae_errors = []
-
-    # Reset preference function
-    preference_fn.reset()
-
-    for idx in indices:
-        state = expert_data["states"][idx]
-        action = expert_data["actions"][idx]
-        # mo_reward = expert_data["rewards"][idx]  # Not currently used
-
-        # Get true preference (simulate trajectory step)
-        # Note: __call__() already increments time_step
-        true_pref = preference_fn()
-
-        # Get predicted preference from SSM
-        pred_pref = trainer.ssm.predict(state, action)
-
-        # Compute errors
-        mse = np.mean((pred_pref - true_pref) ** 2)
-        mae = np.mean(np.abs(pred_pref - true_pref))
-
-        mse_errors.append(mse)
-        mae_errors.append(mae)
-
-    return {
-        "preference_mse": np.mean(mse_errors),
-        "preference_mae": np.mean(mae_errors),
-        "preference_mse_std": np.std(mse_errors),
-        "preference_mae_std": np.std(mae_errors),
-    }
 
 
 def train(config: Dict[str, Any]):
@@ -489,7 +429,7 @@ def train(config: Dict[str, Any]):
     csv_writer = None
     csv_file = None
 
-    for update in range(n_updates):
+    for update in tqdm(range(n_updates), desc="Training Updates"):
         # Sample batch from expert trajectories
         indices = np.random.choice(n_data, batch_size, replace=True)
 
@@ -499,7 +439,7 @@ def train(config: Dict[str, Any]):
         batch_next_states = expert_data["next_states"][indices]
         batch_dones = expert_data["dones"][indices]
 
-        # Update (all data is expert data)
+        # Update Q-network with expert data
         losses = trainer.update(
             states=batch_states,
             actions=batch_actions,
@@ -508,6 +448,21 @@ def train(config: Dict[str, Any]):
             dones=batch_dones,
             is_expert=np.ones(batch_size, dtype=np.float32),  # All expert data
         )
+
+        # Update actor with self-generated trajectories
+        n_rollouts = config.get("n_rollouts_per_update", 100)
+        rollout_data = {"states": [], "preference_weights": []}
+        for _ in range(n_rollouts):
+            data = trainer.collect_rollout(env)
+        rollout_data["states"].extend(data["states"])
+        rollout_data["preference_weights"].extend(data["preference_weights"])
+        actor_loss = trainer.update_actor(
+            states=rollout_data["states"],
+            preference_weights=rollout_data["preference_weights"],
+        )
+
+        # Combine losses
+        losses["actor_loss"] = actor_loss
 
         # Log training losses
         if (update + 1) % 10 == 0:
@@ -532,12 +487,7 @@ def train(config: Dict[str, Any]):
             print(f"Evaluation at update {update + 1}/{n_updates}")
             print(f"{'='*70}")
 
-            # 1. Preference prediction accuracy
-            pref_metrics = compute_preference_accuracy(
-                trainer, expert_data, expert_config, n_samples=100
-            )
-
-            # 2. Episode reward achievement
+            # Episode reward achievement
             eval_metrics = evaluate_policy(
                 trainer, env, n_episodes=eval_episodes, expert_config=expert_config
             )
@@ -546,18 +496,10 @@ def train(config: Dict[str, Any]):
             all_metrics = {
                 "update": update + 1,
                 **losses,
-                **pref_metrics,
                 **eval_metrics,
             }
 
             # Print key metrics
-            print("Preference Prediction:")
-            print(
-                f"  MSE: {pref_metrics['preference_mse']:.6f} ± {pref_metrics['preference_mse_std']:.6f}"
-            )
-            print(
-                f"  MAE: {pref_metrics['preference_mae']:.6f} ± {pref_metrics['preference_mae_std']:.6f}"
-            )
             print("Episode Performance:")
             print(
                 f"  Reward: {eval_metrics['mean_episode_reward']:.2f} ± {eval_metrics['std_episode_reward']:.2f}"
@@ -566,15 +508,13 @@ def train(config: Dict[str, Any]):
                 f"  Length: {eval_metrics['mean_episode_length']:.1f} ± {eval_metrics['std_episode_length']:.1f}"
             )
 
-            if "mean_preference_mse" in eval_metrics:
-                print(f"  Online Pref MSE: {eval_metrics['mean_preference_mse']:.6f}")
+            if "mean_preference_mae" in eval_metrics:
+                print(f"  Online Pref MAE: {eval_metrics['mean_preference_mae']:.6f}")
 
             # Log to wandb
             if config.get("use_wandb", False):
                 wandb.log(
                     {
-                        "eval/preference_mse": pref_metrics["preference_mse"],
-                        "eval/preference_mae": pref_metrics["preference_mae"],
                         "eval/episode_reward_mean": eval_metrics["mean_episode_reward"],
                         "eval/episode_reward_std": eval_metrics["std_episode_reward"],
                         "eval/episode_length_mean": eval_metrics["mean_episode_length"],

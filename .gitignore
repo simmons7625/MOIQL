@@ -46,3 +46,8 @@ data/
 # OS
 .DS_Store
 Thumbs.db
+
+# Others
+moiql_results/
+ppo_results/
+simulation_results/
