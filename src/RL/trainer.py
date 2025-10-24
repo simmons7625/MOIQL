@@ -521,8 +521,13 @@ class PPOTrainer:
                 state = next_state
                 t += 1
 
-                if done:
-                    break
+                # Check termination: use max_timesteps if set, otherwise use done signal
+                if self.max_timesteps is not None:
+                    if t >= self.max_timesteps:
+                        break
+                else:
+                    if done:
+                        break
 
         # plot using matlotlib
         import matplotlib.pyplot as plt
