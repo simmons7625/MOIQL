@@ -20,19 +20,33 @@ class ActorCritic(nn.Module):
         # Actor head
         self.actor = nn.Linear(hidden_dim, action_dim)
 
-        # Critic head
-        self.critic = nn.Linear(hidden_dim, n_objects)
+        # Critic head - outputs Q-values for each (action, objective) pair
+        self.critic = nn.Linear(hidden_dim, action_dim * n_objects)
+
+        self.action_dim = action_dim
+        self.n_objects = n_objects
 
     def forward(self, x):
         features = self.shared(x)
         return features
 
     def act(self, x):
-        features = self.forward(x)
-        logits = self.actor(features)
-        value = self.critic(features)
-        return logits, value
+        """
+        Get policy logits and Q-values.
 
-    def get_value(self, x):
+        Args:
+            x: [batch, obs_dim]
+
+        Returns:
+            logits: [batch, action_dim] - policy logits
+            q_values: [batch, action_dim, n_objectives] - Q-values for each action and objective
+        """
         features = self.forward(x)
-        return self.critic(features)
+        logits = self.actor(features)  # [batch, action_dim]
+        q_flat = self.critic(features)  # [batch, action_dim * n_objectives]
+
+        # Reshape to [batch, action_dim, n_objectives]
+        batch_size = x.shape[0]
+        q_values = q_flat.view(batch_size, self.action_dim, self.n_objects)
+
+        return logits, q_values

@@ -59,10 +59,11 @@ class HighwayWrapper(gym.Wrapper):
 
     def _get_nearest_car_distance(self, obs: np.ndarray) -> float:
         """
-        Compute distance to nearest car from observation.
+        Compute distance to nearest forward car from observation.
         Highway-env observation shape is (num_vehicles, features).
         The ego vehicle is at index 0, other vehicles start from index 1.
         Features typically include [x, y, vx, vy, cos_h, sin_h].
+        Only considers vehicles ahead of the ego vehicle (x > ego_x).
         """
         if len(obs.shape) == 1:
             # Flattened observation, need to reshape
@@ -76,15 +77,24 @@ class HighwayWrapper(gym.Wrapper):
 
         # Ego vehicle position (first row)
         ego_pos = obs[0, :2]  # [x, y]
+        ego_x = ego_pos[0]
 
         # Other vehicles positions (remaining rows)
         other_vehicles = obs[1:, :2]  # [x, y] for each vehicle
 
-        # Compute Euclidean distances
-        distances = np.linalg.norm(other_vehicles - ego_pos, axis=1)
+        # Filter for only forward vehicles (x > ego_x)
+        forward_mask = other_vehicles[:, 0] > ego_x
+        forward_vehicles = other_vehicles[forward_mask]
 
-        # Return minimum distance (or inf if no other vehicles)
-        return float(np.min(distances)) if len(distances) > 0 else float("inf")
+        if len(forward_vehicles) == 0:
+            # No forward vehicles
+            return float("inf")
+
+        # Compute Euclidean distances to forward vehicles only
+        distances = np.linalg.norm(forward_vehicles - ego_pos, axis=1)
+
+        # Return minimum distance
+        return float(np.min(distances))
 
     def reset(self, **kwargs) -> Tuple[np.ndarray, dict]:
         if self.reward_fn:

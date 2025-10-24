@@ -42,6 +42,7 @@ class PPOTrainer:
         batch_size: int = 64,
         n_epochs: int = 10,
         n_rollouts_per_update: int = 10,
+        max_timesteps: int = None,
         device: str = "cuda",
         use_wandb: bool = True,
     ):
@@ -64,10 +65,13 @@ class PPOTrainer:
             max_grad_norm: Max gradient norm for clipping
             batch_size: Batch size for updates
             n_epochs: Number of epochs per update
+            n_rollouts_per_update: Number of rollouts to collect per update
+            max_timesteps: Max timesteps per episode (None = use done signal only)
             device: Device to use
             use_wandb: Whether to use wandb logging
         """
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
+        self.max_timesteps = max_timesteps
         print(f"Using device: {self.device}")
 
         # Create reward function with time-varying preference
@@ -89,9 +93,11 @@ class PPOTrainer:
 
         # Create environment
         if env_name == "deep_sea_treasure":
+            # Enable ignore_done for DST to ensure fixed-length episodes
             self.env = DeepSeaTreasureWrapper(
                 env=gym.make("deep-sea-treasure-v0"),
                 reward_fn=reward_fn,
+                ignore_done=True,
             )
         elif env_name == "mo-highway":
             self.env = HighwayWrapper(
@@ -192,8 +198,13 @@ class PPOTrainer:
                 state = next_state
                 episode_step += 1
 
-                if done:
-                    break
+                # Check termination: use max_timesteps if set, otherwise use done signal
+                if self.max_timesteps is not None:
+                    if episode_step >= self.max_timesteps:
+                        break
+                else:
+                    if done:
+                        break
 
             # Store episode statistics
             all_episode_rewards.append(episode_reward)

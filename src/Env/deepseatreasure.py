@@ -20,11 +20,17 @@ TREASURE_VALUES = [
 class DeepSeaTreasureWrapper(gym.Wrapper):
     """Wrapper for Deep Sea Treasure environment with multi-objective rewards."""
 
-    def __init__(self, env: gym.Env, reward_fn: Optional[RewardFunction] = None):
+    def __init__(
+        self,
+        env: gym.Env,
+        reward_fn: Optional[RewardFunction] = None,
+        ignore_done: bool = False,
+    ):
         super().__init__(env)
         self.n_objectives = 2
         self.reward_fn = reward_fn
         self.return_scalar_reward = reward_fn is not None
+        self.ignore_done = ignore_done
 
         # Fix observation space dtype to float32 if needed
         if hasattr(self.observation_space, "dtype"):
@@ -48,6 +54,11 @@ class DeepSeaTreasureWrapper(gym.Wrapper):
 
         # Store original multi-objective reward in info
         info["mo_reward"] = mo_reward.copy()
+
+        # Override done flags if ignore_done is enabled
+        if self.ignore_done:
+            terminated = False
+            truncated = False
 
         # Apply reward function if provided
         if self.reward_fn:

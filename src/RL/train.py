@@ -113,6 +113,7 @@ def main():
         max_grad_norm=config["max_grad_norm"],
         batch_size=config["batch_size"],
         n_epochs=config["n_epochs"],
+        max_timesteps=config.get("max_timesteps"),
         device=config["device"],
         use_wandb=config.get("use_wandb", False),
     )

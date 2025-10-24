@@ -1,5 +1,6 @@
 # Environment settings
-env_name: "deep_sea_treasure" # Options: "deep_sea_treasure", "mo-highway"
+env_name: "mo-highway" # Options: "deep_sea_treasure", "mo-highway"
+max_timesteps: null # Max timesteps per episode. null means no limit use done signal only
 env_kwargs: {}
 
 # Reward function settings - time-varying preference
@@ -17,14 +18,14 @@ hidden_dim: 256
 lr: 1.0e-4
 gamma: 0.99
 gae_lambda: 0.95
-clip_epsilon: 0.1
+clip_epsilon: 0.2
 vf_coef: 0.5
 ent_coef: 0.01
 max_grad_norm: 0.5
 
 # Training settings
 n_updates: 1000
-n_rollouts_per_update: 100
+n_rollouts_per_update: 10
 n_epochs: 5  # Epochs per update
 batch_size: 64
 

@@ -73,9 +73,11 @@ def create_environment(
 
     # Create environment
     if env_name == "deep_sea_treasure":
+        # Enable ignore_done for DST to ensure fixed-length episodes
         env = DeepSeaTreasureWrapper(
             env=gym.make("deep-sea-treasure-v0"),
             reward_fn=reward_fn,
+            ignore_done=True,
         )
     elif env_name == "mo-highway":
         env = HighwayWrapper(
@@ -93,6 +95,7 @@ def collect_trajectory(
     model: ActorCritic,
     reward_fn: RewardFunction,
     device: str,
+    max_episode_steps: int = None,
     deterministic: bool = False,
 ) -> Dict:
     """
@@ -103,6 +106,7 @@ def collect_trajectory(
         model: Trained policy model
         reward_fn: Reward function for computing scalar rewards
         device: Device to run model on
+        max_episode_steps: Maximum timesteps per episode (None = use done signal only)
         deterministic: If True, take argmax action; otherwise sample
 
     Returns:
@@ -119,10 +123,9 @@ def collect_trajectory(
     }
 
     obs, info = env.reset()
-    done = False
-    truncated = False
+    episode_step = 0
 
-    while not (done or truncated):
+    while True:
         # Store observation
         trajectory["observations"].append(obs.copy())
 
@@ -143,14 +146,25 @@ def collect_trajectory(
         next_obs, reward, done, truncated, info = env.step(action)
 
         # Store transition
+        mo_reward = info.get("mo_reward", None)
+        reward = reward_fn(mo_reward)  # Recompute reward from multi-objective reward
         trajectory["actions"].append(action)
         trajectory["rewards"].append(reward)
-        trajectory["mo_rewards"].append(info.get("mo_reward", None))
+        trajectory["mo_rewards"].append(mo_reward)
         trajectory["preference_weights"].append(info.get("preference_weights", None))
-        trajectory["dones"].append(done)
+        trajectory["dones"].append(done or truncated)
         trajectory["infos"].append(info)
 
         obs = next_obs
+        episode_step += 1
+
+        # Check termination: use max_episode_steps if set, otherwise use done signal
+        if max_episode_steps is not None:
+            if episode_step >= max_episode_steps:
+                break
+        else:
+            if done or truncated:
+                break
 
     # Convert lists to numpy arrays where appropriate
     trajectory["observations"] = np.array(trajectory["observations"])
@@ -187,6 +201,7 @@ def simulate(config: dict):
 
     # Extract other simulation parameters
     n_episodes = config["n_episodes"]
+    max_episode_steps = config.get("max_episode_steps")  # None means use done signal
     output_dir = config["output_dir"]
     deterministic = config.get("deterministic", False)
     device = config.get("device", "cuda")
@@ -252,6 +267,7 @@ def simulate(config: dict):
             model=model,
             reward_fn=reward_fn,
             device=device,
+            max_episode_steps=max_episode_steps,
             deterministic=deterministic,
         )
         trajectories.append(trajectory)

@@ -106,7 +106,11 @@ def load_expert_trajectories(
     preference_weights = []
     next_states = []
     dones = []
+    initial_states = []
+    initial_actions = []
+    initial_preferences = []
 
+    skipped_count = 0
     for traj in trajectories:
         traj_states = np.array(traj["observations"])
         traj_actions = np.array(traj["actions"])
@@ -115,6 +119,11 @@ def load_expert_trajectories(
 
         # Add all transitions from this trajectory
         T = len(traj_states) - 1  # number of transitions
+
+        # Skip trajectories that are too short (need at least 1 transition)
+        if T <= 0:
+            skipped_count += 1
+            continue
 
         states.append(traj_states[:-1])  # s_t
         actions.append(traj_actions)  # a_t
@@ -127,6 +136,14 @@ def load_expert_trajectories(
         done_flags[-1] = True
         dones.append(done_flags)
 
+        # Store initial state separately for each trajectory
+        initial_states.append(traj_states[0])  # First state
+        initial_actions.append(traj_actions[0])  # First action
+        initial_preferences.append(traj_prefs[0])  # First preference
+
+    if skipped_count > 0:
+        print(f"Skipped {skipped_count} trajectories with no transitions")
+
     # Convert to numpy arrays
     data = {
         "states": np.concatenate(states, axis=0),
@@ -135,10 +152,14 @@ def load_expert_trajectories(
         "preference_weights": np.concatenate(preference_weights, axis=0),
         "next_states": np.concatenate(next_states, axis=0),
         "dones": np.concatenate(dones, axis=0),
+        "initial_states": np.array(initial_states),
+        "initial_actions": np.array(initial_actions),
+        "initial_preferences": np.array(initial_preferences),
     }
 
+    n_valid_trajectories = len(trajectories) - skipped_count
     print(
-        f"Loaded {len(trajectories)} trajectories with {len(data['states'])} total transitions"
+        f"Loaded {n_valid_trajectories} valid trajectories (skipped {skipped_count}) with {len(data['states'])} total transitions"
     )
     print(f"  States shape: {data['states'].shape}")
     print(f"  Actions shape: {data['actions'].shape}")
@@ -159,7 +180,8 @@ def create_environment(env_name: str, expert_config: Dict[str, Any]):
         )
         reward_fn = RewardFunction(preference_fn=preference_fn)
 
-        env = DeepSeaTreasureWrapper(env=env, reward_fn=reward_fn)
+        # Enable ignore_done for DST to ensure fixed-length episodes
+        env = DeepSeaTreasureWrapper(env=env, reward_fn=reward_fn, ignore_done=True)
 
     elif env_name == "mo-highway":
         env = gym.make("mo-highway-v0")
@@ -264,7 +286,6 @@ def evaluate_policy(
     trainer: ODSQILTrainer,
     env,
     n_episodes: int = 10,
-    expert_config: Dict[str, Any] = None,
 ) -> Dict[str, Any]:
     """
     Evaluate learned policy.
@@ -284,13 +305,12 @@ def evaluate_policy(
         obs, _ = env.reset()
         episode_reward = 0
         episode_length = 0
-        done = False
 
         # Flatten obs if needed
         if len(obs.shape) > 1:
             obs = obs.flatten()
 
-        while not done and episode_length < 1000:
+        while True:
             # Get action from policy
             obs_t = torch.FloatTensor(obs).unsqueeze(0).to(trainer.device)
 
@@ -301,6 +321,10 @@ def evaluate_policy(
 
             next_obs, reward, terminated, truncated, info = env.step(action)
             done = terminated or truncated
+
+            # Store transition
+            mo_reward = info.get("mo_reward", None)
+            reward = env.reward_fn(mo_reward)
 
             # Track reward
             if isinstance(reward, np.ndarray):
@@ -317,11 +341,14 @@ def evaluate_policy(
                 pred_pref = trainer.ssm.predict(obs, action)
 
                 # Compute MAE
-                pref_error = np.mean(np.abs(pred_pref - true_pref))
+                pref_error = np.abs(pred_pref[0] - true_pref[0])
                 preference_errors.append(pref_error)
 
             obs = next_obs if len(next_obs.shape) == 1 else next_obs.flatten()
             episode_length += 1
+
+            if done:
+                break
 
         episode_rewards.append(episode_reward)
         episode_lengths.append(episode_length)
@@ -387,6 +414,7 @@ def train(config: Dict[str, Any]):
         gamma=config["gamma"],
         tau=config["tau"],
         mismatch_coef=config["mismatch_coef"],
+        max_timesteps=config.get("max_timesteps"),
         device=config["device"],
     )
 
@@ -429,6 +457,9 @@ def train(config: Dict[str, Any]):
     csv_writer = None
     csv_file = None
 
+    # Get number of initial states available
+    n_initial_states = len(expert_data["initial_states"])
+
     for update in tqdm(range(n_updates), desc="Training Updates"):
         # Sample batch from expert trajectories
         indices = np.random.choice(n_data, batch_size, replace=True)
@@ -439,6 +470,12 @@ def train(config: Dict[str, Any]):
         batch_next_states = expert_data["next_states"][indices]
         batch_dones = expert_data["dones"][indices]
 
+        # Sample initial states (sample randomly from available initial states)
+        init_indices = np.random.choice(n_initial_states, size=batch_size, replace=True)
+        batch_initial_states = expert_data["initial_states"][init_indices]
+        batch_initial_actions = expert_data["initial_actions"][init_indices]
+        batch_initial_preferences = expert_data["initial_preferences"][init_indices]
+
         # Update Q-network with expert data
         losses = trainer.update(
             states=batch_states,
@@ -447,21 +484,23 @@ def train(config: Dict[str, Any]):
             next_states=batch_next_states,
             dones=batch_dones,
             is_expert=np.ones(batch_size, dtype=np.float32),  # All expert data
+            initial_states=batch_initial_states,
+            initial_actions=batch_initial_actions,
+            initial_preferences=batch_initial_preferences,
         )
 
-        # Update actor with self-generated trajectories
-        n_rollouts = config.get("n_rollouts_per_update", 100)
-        rollout_data = {"states": [], "preference_weights": []}
-        for _ in range(n_rollouts):
-            data = trainer.collect_rollout(env)
-        rollout_data["states"].extend(data["states"])
-        rollout_data["preference_weights"].extend(data["preference_weights"])
+        # Update actor with expert trajectory data
+        # Sample batch from expert trajectories for actor update
+        actor_batch_size = config.get("actor_batch_size", batch_size * 10)
+        actor_indices = np.random.choice(n_data, actor_batch_size, replace=True)
+
         actor_loss = trainer.update_actor(
-            states=rollout_data["states"],
-            preference_weights=rollout_data["preference_weights"],
+            states=expert_data["states"][actor_indices],
+            actions=expert_data["actions"][actor_indices],
+            preference_weights=expert_data["preference_weights"][actor_indices],
         )
 
-        # Combine losses
+        # Add actor loss to losses dict
         losses["actor_loss"] = actor_loss
 
         # Log training losses
@@ -488,9 +527,7 @@ def train(config: Dict[str, Any]):
             print(f"{'='*70}")
 
             # Episode reward achievement
-            eval_metrics = evaluate_policy(
-                trainer, env, n_episodes=eval_episodes, expert_config=expert_config
-            )
+            eval_metrics = evaluate_policy(trainer, env, n_episodes=eval_episodes)
 
             # Combine metrics
             all_metrics = {
@@ -509,7 +546,9 @@ def train(config: Dict[str, Any]):
             )
 
             if "mean_preference_mae" in eval_metrics:
-                print(f"  Online Pref MAE: {eval_metrics['mean_preference_mae']:.6f}")
+                print(
+                    f"  Online Pref MAE: {eval_metrics['mean_preference_mae']:.4f} +- {eval_metrics['std_preference_mae']:.4f}"
+                )
 
             # Log to wandb
             if config.get("use_wandb", False):
@@ -533,7 +572,7 @@ def train(config: Dict[str, Any]):
             csv_file.flush()
 
         # Progress update
-        if (update + 1) % 100 == 0:
+        if (update + 1) % eval_interval == 0:
             pref_str = ", ".join([f"{w:.3f}" for w in losses["mean_preference"]])
             print(
                 f"Update {update + 1}/{n_updates} | "

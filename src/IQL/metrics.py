@@ -127,7 +127,12 @@ def evaluate_policy(
 
         while not (terminated or truncated):
             action = policy.act(obs)
-            obs, reward, terminated, truncated, _ = env.step(action)
+            obs, reward, terminated, truncated, info = env.step(action)
+
+            # Recompute reward from multi-objective reward
+            mo_reward = info.get("mo_reward", None)
+            reward = env.reward_fn(mo_reward)
+
             episode_reward += reward
 
             if render:

@@ -34,6 +34,7 @@ class ODSQILTrainer:
         gamma: float = 0.99,
         tau: float = 0.005,
         mismatch_coef: float = 1.0,
+        max_timesteps: int = None,
         device: str = "cuda",
     ):
         """
@@ -49,6 +50,7 @@ class ODSQILTrainer:
             gamma: Discount factor
             tau: Soft update coefficient
             mismatch_coef: Coefficient for mismatch regularization
+            max_timesteps: Max timesteps per episode (None = use done signal only)
             device: Device to run on
         """
         self.obs_dim = obs_dim
@@ -57,6 +59,7 @@ class ODSQILTrainer:
         self.gamma = gamma
         self.tau = tau
         self.mismatch_coef = mismatch_coef
+        self.max_timesteps = max_timesteps
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
 
         # State space model for preference prediction
@@ -102,42 +105,46 @@ class ODSQILTrainer:
     def compute_actor_loss(
         self,
         states: torch.Tensor,
+        actions: torch.Tensor,
         preference_weights: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Compute SAC actor loss: E[-Q(s,a) + log π(a|s)]
+        Compute actor loss for discrete actions: log π(a|s) - Q(s,a)
 
         Args:
             states: [batch, obs_dim]
+            actions: [batch] - discrete actions taken
             preference_weights: [batch, n_objectives]
 
         Returns:
             Actor loss tensor
         """
-        # Get policy logits
-        logits, _ = self.q_network.act(states)  # logits: [batch, action_dim]
+        # Get policy logits and Q-values
+        logits, q_values = self.q_network.act(
+            states
+        )  # logits: [batch, action_dim], q_values: [batch, action_dim, n_objectives]
 
-        # Get action probabilities
-        action_probs = torch.softmax(logits, dim=-1)  # [batch, action_dim]
+        # Get log probabilities for actions taken
         log_probs = torch.log_softmax(logits, dim=-1)  # [batch, action_dim]
+        log_probs_taken = log_probs.gather(1, actions.unsqueeze(-1)).squeeze(
+            -1
+        )  # [batch]
 
-        # Compute Q-values for all actions
-        q_all_actions = []
-        for _ in range(self.action_dim):
-            _, q_a = self.q_network.act(states)
-            q_all_actions.append(q_a)
-        q_all_actions = torch.stack(
-            q_all_actions, dim=1
-        )  # [batch, action_dim, n_objectives]
+        # Get Q-values for actions taken
+        # q_values: [batch, action_dim, n_objectives]
+        actions_idx = actions.unsqueeze(-1).unsqueeze(-1)  # [batch, 1, 1]
+        actions_idx = actions_idx.expand(
+            -1, -1, self.n_objectives
+        )  # [batch, 1, n_objectives]
+        q_taken = q_values.gather(1, actions_idx).squeeze(1)  # [batch, n_objectives]
 
-        # Convert to scalar Q using preference weights
-        q_scalar = torch.einsum(
-            "bao,bo->ba", q_all_actions, preference_weights
-        )  # [batch, action_dim]
+        # Compute scalar Q-values using preference weights
+        # q_taken: [batch, n_objectives]
+        # preference_weights: [batch, n_objectives]
+        q_scalar = torch.einsum("bo,bo->b", q_taken, preference_weights)  # [batch]
 
-        # SAC policy loss: E_a~π[-Q(s,a) + log π(a|s)]
-        # = sum_a π(a|s) * [-Q(s,a) + log π(a|s)]
-        actor_loss = (action_probs * (-q_scalar + log_probs)).sum(dim=-1).mean()
+        # Actor loss: log π(a|s) - Q(s,a) for actions taken
+        actor_loss = (log_probs_taken - q_scalar).mean()
 
         return actor_loss
 
@@ -147,6 +154,8 @@ class ODSQILTrainer:
         actions: torch.Tensor,
         next_states: torch.Tensor,
         preference_weights: torch.Tensor,
+        initial_states: torch.Tensor,
+        initial_preferences: torch.Tensor,
     ) -> Dict[str, float]:
         """
         Compute Soft IQ loss with mismatch regularization.
@@ -158,20 +167,16 @@ class ODSQILTrainer:
             actions: [batch] (discrete actions)
             next_states: [batch, obs_dim]
             preference_weights: [batch, n_objectives]
+            initial_states: [batch, obs_dim] - initial states from episodes
+            initial_preferences: [batch, n_objectives] - preferences at initial states
 
         Returns:
             Dictionary of loss values
         """
         # ===== Compute Q-values (objective-dimensional) =====
         # Q(s, a) for all actions: [batch, action_dim, n_objectives]
-        q_all_actions = []
-        for _ in range(self.action_dim):
-            # Create dummy action inputs (not used in current architecture)
-            state_action = states  # Simplified: assuming Q depends only on state
-            _, q_values = self.q_network.act(state_action)  # [batch, n_objectives]
-            q_all_actions.append(q_values)
-        q_all_actions = torch.stack(
-            q_all_actions, dim=1
+        _, q_all_actions = self.q_network.act(
+            states
         )  # [batch, action_dim, n_objectives]
 
         # Get Q(s, a) for taken actions
@@ -184,31 +189,33 @@ class ODSQILTrainer:
         )  # [batch, n_objectives]
 
         # ===== Compute v_init = E_{a~π}[Q(s_0, a)] =====
-        # Use the first state in the batch as s_0 (initial state)
-        # Q(s_0, a) for all actions from q_all_actions[0]: [action_dim, n_objectives]
-        q_init_all = q_all_actions[0]  # [action_dim, n_objectives]
+        # Compute Q-values for initial states: [batch, action_dim, n_objectives]
+        _, q_init_all_actions = self.q_network.act(
+            initial_states
+        )  # [batch, action_dim, n_objectives]
 
-        # Convert to scalar Q using preference weights for initial state
+        # Convert to scalar Q using preference weights for initial states
+        # q_init_all_actions: [batch, action_dim, n_objectives]
+        # initial_preferences: [batch, n_objectives]
         q_init_scalar = torch.einsum(
-            "ao,o->a", q_init_all, preference_weights[0]
-        )  # [action_dim]
+            "bao,bo->ba", q_init_all_actions, initial_preferences
+        )  # [batch, action_dim]
 
-        # Get policy probabilities for initial state
+        # Get policy probabilities for initial states
         with torch.no_grad():
-            logits_init, _ = self.q_network.act(states[0:1])
-            pi_init = torch.softmax(logits_init, dim=-1).squeeze(0)  # [action_dim]
+            logits_init, _ = self.q_network.act(initial_states)
+            pi_init = torch.softmax(logits_init, dim=-1)  # [batch, action_dim]
 
-        # Compute v_init = Σ_a π(a|s_0) * Q(s_0, a)
-        v_init = torch.sum(pi_init * q_init_scalar)  # scalar
+        # Compute v_init = average over initial states: Σ_a π(a|s_0) * Q(s_0, a)
+        v_init_per_state = torch.sum(pi_init * q_init_scalar, dim=1)  # [batch]
+        v_init = v_init_per_state.mean()  # scalar
 
         # ===== Compute target Q-values =====
         with torch.no_grad():
             # Next state Q-values: [batch, action_dim, n_objectives]
-            q_next_all = []
-            for _ in range(self.action_dim):
-                _, q_next = self.q_target.act(next_states)
-                q_next_all.append(q_next)
-            q_next_all = torch.stack(q_next_all, dim=1)
+            _, q_next_all = self.q_target.act(
+                next_states
+            )  # [batch, action_dim, n_objectives]
 
             # Expectation over policy: V(s') = E_{a~π}[Q(s', a)]
             # For objective-dimensional Q, we compute scalar Q using preference weights
@@ -256,6 +263,9 @@ class ODSQILTrainer:
         next_states: np.ndarray,
         dones: np.ndarray,
         is_expert: np.ndarray,
+        initial_states: np.ndarray,
+        initial_actions: np.ndarray,
+        initial_preferences: np.ndarray,
     ) -> Dict[str, float]:
         """
         Update Q-network with a batch of data.
@@ -267,17 +277,27 @@ class ODSQILTrainer:
             next_states: [batch, obs_dim]
             dones: [batch]
             is_expert: [batch] - 1 for expert, 0 for agent
+            initial_states: [batch, obs_dim] - initial states from episodes
+            initial_actions: [batch] - actions at initial states
+            initial_preferences: [batch, n_objectives] - preferences at initial states
 
         Returns:
             Dictionary of loss values
         """
         # Convert to tensors
         states_t = torch.FloatTensor(states).to(self.device)
-        actions_t = torch.FloatTensor(actions).to(self.device)
+        actions_t = torch.LongTensor(actions).to(self.device)
         _rewards_t = torch.FloatTensor(rewards).to(self.device)  # For future use
         next_states_t = torch.FloatTensor(next_states).to(self.device)
         _dones_t = torch.FloatTensor(dones).to(self.device)  # For future use
         _is_expert_t = torch.FloatTensor(is_expert).to(self.device)  # For future use
+
+        # Convert initial states to tensors
+        initial_states_t = torch.FloatTensor(initial_states).to(self.device)
+        _initial_actions_t = torch.LongTensor(initial_actions).to(
+            self.device
+        )  # For future use
+        initial_preferences_t = torch.FloatTensor(initial_preferences).to(self.device)
 
         # Update SSM to get current preference estimate for each transition
         batch_size = states.shape[0]
@@ -286,8 +306,14 @@ class ODSQILTrainer:
         for i in range(batch_size):
             # Get Q-values to use as "expert Q" for SSM update
             with torch.no_grad():
-                _, q_values = self.q_network.act(states_t[i : i + 1])
-                q_expert = q_values.squeeze().cpu().numpy()
+                _, q_values_all = self.q_network.act(
+                    states_t[i : i + 1]
+                )  # [1, action_dim, n_objectives]
+                # Get Q-value for the action taken
+                action_idx = int(actions[i])
+                q_expert = (
+                    q_values_all[0, action_idx, :].cpu().numpy()
+                )  # [n_objectives]
 
             # Update SSM
             self.ssm.update(
@@ -309,6 +335,8 @@ class ODSQILTrainer:
             actions_t,
             next_states_t,
             preference_weights_t,
+            initial_states_t,
+            initial_preferences_t,
         )
 
         # Backward pass for Q
@@ -338,19 +366,23 @@ class ODSQILTrainer:
             env: Environment to collect from
 
         Returns:
-            Dictionary with states and preference_weights
+            Dictionary with states, actions, and preference_weights
         """
         states = []
+        actions = []
         preference_weights = []
 
         obs, _ = env.reset()
         self.ssm.reset()
+        episode_step = 0
 
         while True:
             # Get action from policy
             with torch.no_grad():
                 obs_t = torch.FloatTensor(obs).unsqueeze(0).to(self.device)
-                logits, _ = self.q_network.act(obs_t)
+                logits, q_values_all = self.q_network.act(
+                    obs_t
+                )  # [1, action_dim], [1, action_dim, n_objectives]
                 probs = torch.softmax(logits, dim=-1)
                 action = torch.multinomial(probs, 1).item()
 
@@ -359,17 +391,19 @@ class ODSQILTrainer:
 
             # Store transition
             states.append(obs)
+            actions.append(action)
             preference_weights.append(pref)
 
             # Take step
             next_obs, reward, terminated, truncated, info = env.step(action)
-            done = terminated or truncated
 
-            # Update SSM with current Q-values
+            # Update SSM with current Q-values for the action taken
             with torch.no_grad():
                 obs_t = torch.FloatTensor(obs).unsqueeze(0).to(self.device)
-                _, q_values = self.q_network.act(obs_t)
-                q_expert = q_values.squeeze().cpu().numpy()
+                _, q_values_all = self.q_network.act(
+                    obs_t
+                )  # [1, action_dim, n_objectives]
+                q_expert = q_values_all[0, action, :].cpu().numpy()  # [n_objectives]
 
             self.ssm.update(
                 observation=obs,
@@ -379,25 +413,34 @@ class ODSQILTrainer:
             )
 
             obs = next_obs
+            episode_step += 1
 
-            if done:
-                break
+            # Check termination: use max_timesteps if set, otherwise use done signal
+            if self.max_timesteps is not None:
+                if episode_step >= self.max_timesteps:
+                    break
+            else:
+                if terminated or truncated:
+                    break
 
         return {
             "states": np.array(states),
+            "actions": np.array(actions),
             "preference_weights": np.array(preference_weights),
         }
 
     def update_actor(
         self,
         states: np.ndarray,
+        actions: np.ndarray,
         preference_weights: np.ndarray,
     ) -> float:
         """
-        Update actor (policy) using self-generated trajectories.
+        Update actor (policy) using self-generated rollouts.
 
         Args:
             states: [batch, obs_dim] from self-generated rollouts
+            actions: [batch] actual actions taken
             preference_weights: [batch, n_objectives] predicted preferences
 
         Returns:
@@ -405,10 +448,11 @@ class ODSQILTrainer:
         """
         # Convert to tensors
         states_t = torch.FloatTensor(states).to(self.device)
+        actions_t = torch.LongTensor(actions).to(self.device)
         preference_weights_t = torch.FloatTensor(preference_weights).to(self.device)
 
         # Compute actor loss
-        actor_loss = self.compute_actor_loss(states_t, preference_weights_t)
+        actor_loss = self.compute_actor_loss(states_t, actions_t, preference_weights_t)
 
         # Backward pass for actor
         self.actor_optimizer.zero_grad()
