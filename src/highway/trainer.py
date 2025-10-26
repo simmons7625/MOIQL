@@ -10,15 +10,9 @@ from tqdm import tqdm
 import csv
 
 import mo_gymnasium as gym
-from src.Env.highway import HighwayWrapper
-from src.Env.deepseatreasure import DeepSeaTreasureWrapper
-
-from src.Env.reward_function import (
-    RewardFunction,
-    DSTPreferenceFunction,
-    HighwayPreferenceFunction,
-)
-from src.RL.model import ActorCritic, RolloutBuffer
+from src.highway.env import HighwayWrapper
+from src.highway.reward_function import RewardFunction, HighwayPreferenceFunction
+from src.highway.model import ActorCritic, RolloutBuffer
 
 
 class PPOTrainer:
@@ -26,7 +20,6 @@ class PPOTrainer:
 
     def __init__(
         self,
-        env_name: str,
         contenous_decay: float = 0.01,
         init_treasure_weight: float = 1.0,
         safety_distance_threshold: float = 10.0,
@@ -43,14 +36,16 @@ class PPOTrainer:
         n_epochs: int = 10,
         n_rollouts_per_update: int = 10,
         max_timesteps: int = None,
+        max_num_treasure: int = 1,
+        use_local_obs: bool = True,
+        local_obs_size: int = 3,
         device: str = "cuda",
         use_wandb: bool = True,
     ):
         """
-        Initialize PPO trainer.
+        Initialize PPO trainer for Highway environment.
 
         Args:
-            env_name: Environment name
             contenous_decay: Continuous linear decay rate for preference weight
             init_treasure_weight: Initial weight for treasure/speed objective
             safety_distance_threshold: Distance threshold for safety switching (Highway only)
@@ -75,37 +70,18 @@ class PPOTrainer:
         print(f"Using device: {self.device}")
 
         # Create reward function with time-varying preference
-        if env_name == "deep_sea_treasure":
-            preference_fn = DSTPreferenceFunction(
-                contenous_decay=contenous_decay,
-                init_treasure_weight=init_treasure_weight,
-            )
-        elif env_name == "mo-highway":
-            preference_fn = HighwayPreferenceFunction(
-                init_speed_weight=init_treasure_weight,
-                safety_distance_threshold=safety_distance_threshold,
-                safety_boost_factor=safety_boost_factor,
-            )
-        else:
-            raise ValueError(f"Unsupported environment: {env_name}")
-
+        preference_fn = HighwayPreferenceFunction(
+            init_speed_weight=init_treasure_weight,
+            safety_distance_threshold=safety_distance_threshold,
+            safety_boost_factor=safety_boost_factor,
+        )
         reward_fn = RewardFunction(preference_fn=preference_fn)
 
-        # Create environment
-        if env_name == "deep_sea_treasure":
-            # Enable ignore_done for DST to ensure fixed-length episodes
-            self.env = DeepSeaTreasureWrapper(
-                env=gym.make("deep-sea-treasure-v0"),
-                reward_fn=reward_fn,
-                ignore_done=True,
-            )
-        elif env_name == "mo-highway":
-            self.env = HighwayWrapper(
-                env=gym.make("mo-highway-v0"),
-                reward_fn=reward_fn,
-            )
-        else:
-            raise ValueError(f"Unsupported environment: {env_name}")
+        # Create Highway environment
+        self.env = HighwayWrapper(
+            env=gym.make("mo-highway-v0"),
+            reward_fn=reward_fn,
+        )
         # Handle observation space - flatten if multi-dimensional
         if len(self.env.observation_space.shape) == 1:
             obs_dim = self.env.observation_space.shape[0]
@@ -490,64 +466,6 @@ class PPOTrainer:
         }
 
         return final_metrics
-
-    def plot_preference_weights(self, save_path: str):
-        """Plot preference weights over one episode"""
-        state, _ = self.env.reset()
-        self.reward_fn.reset()
-        timesteps = []
-        episode_weights = []
-
-        with torch.no_grad():
-            t = 0
-            while True:
-                # Flatten state if multi-dimensional
-                state_flat = state.flatten() if len(state.shape) > 1 else state
-                state_t = torch.FloatTensor(state_flat).unsqueeze(0).to(self.device)
-
-                with torch.no_grad():
-                    logits, value = self.ac.act(state_t)
-                    dist = Categorical(logits=logits)
-                    action = dist.sample()
-
-                next_state, reward, terminated, truncated, info = self.env.step(
-                    action.item()
-                )
-                done = terminated or truncated
-                weights = self.reward_fn.preference_fn()
-                episode_weights.append(weights)
-                timesteps.append(t)
-
-                state = next_state
-                t += 1
-
-                # Check termination: use max_timesteps if set, otherwise use done signal
-                if self.max_timesteps is not None:
-                    if t >= self.max_timesteps:
-                        break
-                else:
-                    if done:
-                        break
-
-        # plot using matlotlib
-        import matplotlib.pyplot as plt
-
-        episode_weights = np.array(episode_weights)
-        timesteps = np.array(timesteps)
-
-        plt.figure()
-        plt.plot(timesteps, episode_weights[:, 0], label="Objective 1 Weight")
-        if episode_weights.shape[1] >= 2:
-            plt.plot(timesteps, episode_weights[:, 1], label="Objective 2 Weight")
-        if episode_weights.shape[1] >= 3:
-            plt.plot(timesteps, episode_weights[:, 2], label="Objective 3 Weight")
-        plt.xlabel("Timesteps")
-        plt.ylabel("Preference Weights")
-        plt.title("Preference Weights Over Time")
-        plt.legend()
-        plt.grid()
-        plt.tight_layout()
-        plt.savefig(save_path)
 
     def save(self, filename: str):
         """Save model checkpoint."""

@@ -1,3 +1,8 @@
+#!/usr/bin/env python3
+"""
+Training script for PPO on Deep Sea Treasure environment.
+"""
+
 import argparse
 import json
 import warnings
@@ -7,7 +12,7 @@ from pathlib import Path
 import wandb
 import yaml
 
-from src.RL.trainer import PPOTrainer
+from src.dst.trainer import PPOTrainer
 
 # Suppress warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="pygame.pkgdata")
@@ -56,22 +61,18 @@ def save_results(results_dir: str, trainer: PPOTrainer):
         json.dump(model_info, f, indent=2)
     print(f"Saved model info to {model_info_path}")
 
-    # plot preference weights
-    trainer.plot_preference_weights(save_path=results_dir / "preference_weights.png")
-    print(f"Saved preference weights plot to {results_dir / 'preference_weights.png'}")
-
     return results_dir
 
 
 def main():
-    """Main training function for PPO."""
+    """Main training function for PPO on Deep Sea Treasure."""
     parser = argparse.ArgumentParser(
-        description="Train PPO agent on multi-objective environment"
+        description="Train PPO agent on Deep Sea Treasure environment"
     )
     parser.add_argument(
         "--config",
         type=str,
-        default="configs/rl.yaml",
+        default="configs/dst.yaml",
         help="Path to configuration file",
     )
 
@@ -98,11 +99,8 @@ def main():
         init_weight = init_weight[0]  # Use first element for initial weight
 
     trainer = PPOTrainer(
-        env_name=config["env_name"],
         contenous_decay=config["contenous_decay"],
         init_treasure_weight=init_weight,
-        safety_distance_threshold=config.get("safety_distance_threshold", 10.0),
-        safety_boost_factor=config.get("safety_boost_factor", 1.5),
         hidden_dim=config["hidden_dim"],
         lr=config["lr"],
         gamma=config["gamma"],
@@ -114,6 +112,9 @@ def main():
         batch_size=config["batch_size"],
         n_epochs=config["n_epochs"],
         max_timesteps=config.get("max_timesteps"),
+        max_num_treasure=config.get("max_num_treasure", 1),
+        use_local_obs=config.get("use_local_obs", True),
+        local_obs_size=config.get("local_obs_size", 3),
         device=config["device"],
         use_wandb=config.get("use_wandb", False),
     )

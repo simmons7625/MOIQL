@@ -16,21 +16,12 @@ from pathlib import Path
 from typing import Dict, Any
 
 import numpy as np
-import torch
 import wandb
 import yaml
 from tqdm import tqdm
 
-import mo_gymnasium as gym
-from src.Env.deepseatreasure import DeepSeaTreasureWrapper
-from src.Env.highway import HighwayWrapper
-from src.Env.reward_function import (
-    RewardFunction,
-    DSTPreferenceFunction,
-    HighwayPreferenceFunction,
-)
 from src.IQL.trainer import ODSQILTrainer
-from src.IQL.ssm import StateSpaceModel, ParticleFilter
+from src.IQL.ssm import StateSpaceModel, ParticleFilter, ExtendedKalmanFilter, NeuralSSM
 
 # Suppress warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="pygame.pkgdata")
@@ -43,6 +34,32 @@ def load_config(config_path: str) -> Dict[str, Any]:
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
     return config
+
+
+def infer_env_name(train_dir: str) -> str:
+    """
+    Infer environment name from train_dir path.
+
+    Args:
+        train_dir: Path like "dst_train/20251026_200603" or "highway_train/20251026_200603"
+
+    Returns:
+        Environment name: "deep_sea_treasure" or "mo-highway"
+    """
+    train_dir_lower = train_dir.lower()
+    if (
+        "dst" in train_dir_lower
+        or "deep" in train_dir_lower
+        or "treasure" in train_dir_lower
+    ):
+        return "deep_sea_treasure"
+    elif "highway" in train_dir_lower:
+        return "mo-highway"
+    else:
+        raise ValueError(
+            f"Cannot infer environment from train_dir: {train_dir}. "
+            "Expected 'dst_train' or 'highway_train' in path."
+        )
 
 
 def load_expert_config(expert_dir: str) -> Dict[str, Any]:
@@ -67,7 +84,13 @@ def load_expert_config(expert_dir: str) -> Dict[str, Any]:
         raise FileNotFoundError(f"Training config not found at {train_config_path}")
 
     with open(train_config_path, "r") as f:
-        return yaml.safe_load(f)
+        training_config = yaml.safe_load(f)
+
+    # Infer and add env_name to config
+    env_name = infer_env_name(train_dir)
+    training_config["env_name"] = env_name
+
+    return training_config
 
 
 def load_expert_trajectories(
@@ -168,42 +191,9 @@ def load_expert_trajectories(
     return data
 
 
-def create_environment(env_name: str, expert_config: Dict[str, Any]):
-    """Create environment with same configuration as expert."""
-    if env_name == "deep_sea_treasure":
-        env = gym.make("deep-sea-treasure-v0")
-
-        # Create preference function
-        preference_fn = DSTPreferenceFunction(
-            contenous_decay=expert_config.get("contenous_decay", 0.01),
-            init_treasure_weight=expert_config.get("init_weight", [0.8, 0.2])[0],
-        )
-        reward_fn = RewardFunction(preference_fn=preference_fn)
-
-        # Enable ignore_done for DST to ensure fixed-length episodes
-        env = DeepSeaTreasureWrapper(env=env, reward_fn=reward_fn, ignore_done=True)
-
-    elif env_name == "mo-highway":
-        env = gym.make("mo-highway-v0")
-
-        # Create preference function
-        preference_fn = HighwayPreferenceFunction(
-            init_speed_weight=expert_config.get("init_weight", [0.8, 0.2])[0],
-            safety_distance_threshold=expert_config.get(
-                "safety_distance_threshold", 10.0
-            ),
-            safety_boost_factor=expert_config.get("safety_boost_factor", 1.5),
-        )
-        reward_fn = RewardFunction(preference_fn=preference_fn)
-
-        env = HighwayWrapper(env=env, reward_fn=reward_fn)
-    else:
-        raise ValueError(f"Unsupported environment: {env_name}")
-
-    return env
-
-
-def create_ssm(config: Dict[str, Any], n_objectives: int) -> StateSpaceModel:
+def create_ssm(
+    config: Dict[str, Any], n_objectives: int, obs_dim: int, action_dim: int
+) -> StateSpaceModel:
     """Create State Space Model for preference prediction."""
     ssm_type = config.get("ssm_type", "pf")
 
@@ -229,6 +219,25 @@ def create_ssm(config: Dict[str, Any], n_objectives: int) -> StateSpaceModel:
             n_particles=pf_config.get("n_particles", 1000),
             process_noise=pf_config.get("process_noise", 0.01),
             observation_noise=pf_config.get("observation_noise", 0.1),
+        )
+    elif full_type == "extended_kalman_filter":
+        ekf_config = config.get("ekf", {})
+        ssm = ExtendedKalmanFilter(
+            n_objectives=n_objectives,
+            process_noise=ekf_config.get("process_noise", 0.01),
+            observation_noise=ekf_config.get("observation_noise", 0.1),
+            initial_variance=ekf_config.get("initial_variance", 0.1),
+        )
+    elif full_type == "neural_ssm":
+        neural_config = config.get("neural_ssm", {})
+        ssm = NeuralSSM(
+            obs_dim=obs_dim,
+            action_dim=action_dim,
+            n_objectives=n_objectives,
+            hidden_dim=neural_config.get("hidden_dim", 64),
+            n_layers=neural_config.get("n_layers", 2),
+            learning_rate=neural_config.get("learning_rate", 0.001),
+            device=config.get("device", "cuda"),
         )
     else:
         raise ValueError(f"SSM type '{full_type}' not yet implemented")
@@ -282,87 +291,46 @@ def save_model_and_info(
     print(f"Saved model info to {model_info_path}")
 
 
-def evaluate_policy(
+def evaluate(
     trainer: ODSQILTrainer,
-    env,
-    n_episodes: int = 10,
+    expert_data: Dict[str, np.ndarray],
+    n_samples: int = 100,
 ) -> Dict[str, Any]:
     """
-    Evaluate learned policy.
+    Evaluate preference prediction accuracy on expert data.
+
+    Args:
+        trainer: OD-SQIL trainer
+        expert_data: Dictionary containing expert trajectories
+        n_samples: Number of samples to evaluate
 
     Returns:
         Dictionary containing:
-        - mean_episode_reward: Average episode reward
-        - std_episode_reward: Std of episode reward
-        - mean_episode_length: Average episode length
-        - preference_accuracy: MSE between predicted and true preferences
+        - mean_preference_mae: Mean absolute error for preference prediction
+        - std_preference_mae: Std of preference MAE
     """
-    episode_rewards = []
-    episode_lengths = []
+    # Sample random transitions from expert data
+    n_data = len(expert_data["states"])
+    indices = np.random.choice(n_data, min(n_samples, n_data), replace=False)
+
     preference_errors = []
 
-    for ep in range(n_episodes):
-        obs, _ = env.reset()
-        episode_reward = 0
-        episode_length = 0
+    for idx in indices:
+        state = expert_data["states"][idx]
+        action = expert_data["actions"][idx]
+        true_pref = expert_data["preference_weights"][idx]
 
-        # Flatten obs if needed
-        if len(obs.shape) > 1:
-            obs = obs.flatten()
+        # Get predicted preference from SSM
+        pred_pref = trainer.ssm.predict(state, action)
 
-        while True:
-            # Get action from policy
-            obs_t = torch.FloatTensor(obs).unsqueeze(0).to(trainer.device)
-
-            with torch.no_grad():
-                logits, _ = trainer.q_network.act(obs_t)
-                action_probs = torch.softmax(logits, dim=-1)
-                action = torch.argmax(action_probs, dim=-1).item()
-
-            next_obs, reward, terminated, truncated, info = env.step(action)
-            done = terminated or truncated
-
-            # Store transition
-            mo_reward = info.get("mo_reward", None)
-            reward = env.reward_fn(mo_reward)
-
-            # Track reward
-            if isinstance(reward, np.ndarray):
-                episode_reward += reward.sum()
-            else:
-                episode_reward += reward
-
-            # Check preference accuracy if available
-            if "preference_weights" in info and "mo_reward" in info:
-                true_pref = np.array(info["preference_weights"])
-                # mo_reward = np.array(info["mo_reward"])  # Not currently used
-
-                # Get predicted preference from SSM
-                pred_pref = trainer.ssm.predict(obs, action)
-
-                # Compute MAE
-                pref_error = np.abs(pred_pref[0] - true_pref[0])
-                preference_errors.append(pref_error)
-
-            obs = next_obs if len(next_obs.shape) == 1 else next_obs.flatten()
-            episode_length += 1
-
-            if done:
-                break
-
-        episode_rewards.append(episode_reward)
-        episode_lengths.append(episode_length)
+        # Compute MAE for first objective (treasure weight)
+        pref_error = np.abs(pred_pref[0] - true_pref[0])
+        preference_errors.append(pref_error)
 
     results = {
-        "mean_episode_reward": np.mean(episode_rewards),
-        "std_episode_reward": np.std(episode_rewards),
-        "mean_episode_length": np.mean(episode_lengths),
-        "std_episode_length": np.std(episode_lengths),
+        "mean_preference_mae": np.mean(preference_errors),
+        "std_preference_mae": np.std(preference_errors),
     }
-
-    if len(preference_errors) > 0:
-        results["mean_preference_mae"] = np.mean(preference_errors)
-        results["std_preference_mae"] = np.std(preference_errors)
 
     return results
 
@@ -380,28 +348,32 @@ def train(config: Dict[str, Any]):
         str(expert_dir), n_trajectories=config.get("n_trajectories")
     )
 
-    # Get environment info from expert config
+    # Get environment name from expert_config (auto-inferred from train_dir path)
     env_name = expert_config["env_name"]
     print(f"Environment: {env_name}")
 
-    # Create environment
-    env = create_environment(env_name, expert_config)
+    # Use expert config for environment settings to ensure exact match with expert data
+    # Only override with IQL config for IQL-specific hyperparameters (lr, gamma, tau, etc.)
+    # Expert config has priority for environment settings
+    env_config = {**config, **expert_config}
 
-    # Get dimensions
-    if len(env.observation_space.shape) == 1:
-        obs_dim = env.observation_space.shape[0]
-    else:
-        obs_dim = int(np.prod(env.observation_space.shape))
+    print("Environment settings loaded from expert config:")
+    print(f"  use_local_obs: {env_config.get('use_local_obs')}")
+    print(f"  local_obs_size: {env_config.get('local_obs_size')}")
+    print(f"  max_num_treasure: {env_config.get('max_num_treasure')}")
+    print(f"  max_timesteps: {env_config.get('max_timesteps')}")
 
-    action_dim = env.action_space.n
-    n_objectives = env.n_objectives
+    # Get dimensions from expert data
+    obs_dim = expert_data["states"].shape[1]
+    action_dim = int(expert_data["actions"].max() + 1)  # Discrete actions
+    n_objectives = expert_data["preference_weights"].shape[1]
 
     print(f"Observation dim: {obs_dim}")
     print(f"Action dim: {action_dim}")
     print(f"Number of objectives: {n_objectives}")
 
     # Create SSM
-    ssm = create_ssm(config, n_objectives)
+    ssm = create_ssm(config, n_objectives, obs_dim, action_dim)
 
     # Create trainer
     trainer = ODSQILTrainer(
@@ -489,20 +461,6 @@ def train(config: Dict[str, Any]):
             initial_preferences=batch_initial_preferences,
         )
 
-        # Update actor with expert trajectory data
-        # Sample batch from expert trajectories for actor update
-        actor_batch_size = config.get("actor_batch_size", batch_size * 10)
-        actor_indices = np.random.choice(n_data, actor_batch_size, replace=True)
-
-        actor_loss = trainer.update_actor(
-            states=expert_data["states"][actor_indices],
-            actions=expert_data["actions"][actor_indices],
-            preference_weights=expert_data["preference_weights"][actor_indices],
-        )
-
-        # Add actor loss to losses dict
-        losses["actor_loss"] = actor_loss
-
         # Log training losses
         if (update + 1) % 10 == 0:
             log_dict = {
@@ -510,7 +468,6 @@ def train(config: Dict[str, Any]):
                 "total_loss": losses["total_loss"],
                 "soft_iq_loss": losses["soft_iq_loss"],
                 "mismatch_loss": losses["mismatch_loss"],
-                "actor_loss": losses["actor_loss"],
             }
 
             # Log preference weights
@@ -526,8 +483,8 @@ def train(config: Dict[str, Any]):
             print(f"Evaluation at update {update + 1}/{n_updates}")
             print(f"{'='*70}")
 
-            # Episode reward achievement
-            eval_metrics = evaluate_policy(trainer, env, n_episodes=eval_episodes)
+            # Evaluate preference prediction accuracy on expert data
+            eval_metrics = evaluate(trainer, expert_data, n_samples=eval_episodes * 10)
 
             # Combine metrics
             all_metrics = {
@@ -537,26 +494,17 @@ def train(config: Dict[str, Any]):
             }
 
             # Print key metrics
-            print("Episode Performance:")
+            print("Preference Prediction Performance:")
             print(
-                f"  Reward: {eval_metrics['mean_episode_reward']:.2f} ± {eval_metrics['std_episode_reward']:.2f}"
+                f"  Preference MAE: {eval_metrics['mean_preference_mae']:.4f} ± {eval_metrics['std_preference_mae']:.4f}"
             )
-            print(
-                f"  Length: {eval_metrics['mean_episode_length']:.1f} ± {eval_metrics['std_episode_length']:.1f}"
-            )
-
-            if "mean_preference_mae" in eval_metrics:
-                print(
-                    f"  Online Pref MAE: {eval_metrics['mean_preference_mae']:.4f} +- {eval_metrics['std_preference_mae']:.4f}"
-                )
 
             # Log to wandb
             if config.get("use_wandb", False):
                 wandb.log(
                     {
-                        "eval/episode_reward_mean": eval_metrics["mean_episode_reward"],
-                        "eval/episode_reward_std": eval_metrics["std_episode_reward"],
-                        "eval/episode_length_mean": eval_metrics["mean_episode_length"],
+                        "eval/preference_mae_mean": eval_metrics["mean_preference_mae"],
+                        "eval/preference_mae_std": eval_metrics["std_preference_mae"],
                     },
                     step=update + 1,
                 )

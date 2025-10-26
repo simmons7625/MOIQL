@@ -12,12 +12,23 @@ class HighwayWrapper(gym.Wrapper):
         env: gym.Env,
         objectives: list[str] = None,
         reward_fn: Optional[RewardFunction] = None,
+        render_mode: Optional[str] = None,
+        render_fps: int = 15,
     ):
         super().__init__(env)
         self.objectives = objectives or ["speed", "safety"]
         self.n_objectives = len(self.objectives)
         self.reward_fn = reward_fn
         self.return_scalar_reward = reward_fn is not None
+        self._render_mode = render_mode
+        self.render_fps = render_fps
+
+        # Initialize pygame clock if rendering is enabled
+        self.clock = None
+        if self._render_mode == "human":
+            import pygame
+
+            self.clock = pygame.time.Clock()
 
     def step(self, action: int) -> Tuple[np.ndarray, np.ndarray, bool, bool, dict]:
         obs, reward, terminated, truncated, info = self.env.step(action)
@@ -30,6 +41,12 @@ class HighwayWrapper(gym.Wrapper):
 
         # Store original multi-objective reward in info
         info["mo_reward"] = mo_reward.copy()
+
+        # Render if enabled
+        if self._render_mode == "human":
+            self.env.render()
+            if self.clock is not None:
+                self.clock.tick(self.render_fps)
 
         # Apply reward function if provided
         if self.reward_fn:

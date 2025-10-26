@@ -1,0 +1,30 @@
+# Reward function settings - time-varying preference
+init_weight: [1.0, 0.0]  # Initial weight for [treasure/speed] or [time/safety]
+
+# Highway-specific settings (only used when env_name is "highway")
+safety_distance_threshold: 10.0  # Distance threshold for safety switching
+safety_boost_factor: 2.0  # Factor to boost safety weight when close to cars
+
+# Model architecture
+hidden_dim: 256
+
+# PPO hyperparameters
+lr: 1.0e-4
+gamma: 0.99
+gae_lambda: 0.95
+clip_epsilon: 0.1
+vf_coef: 0.5
+ent_coef: 0.01
+max_grad_norm: 0.5
+
+# Training settings
+n_updates: 1000
+n_rollouts_per_update: 10
+n_epochs: 5  # Epochs per update
+batch_size: 256
+
+# Save settings
+save_dir: "highway_train"
+
+# Device
+device: "cuda"  # cuda or cpu

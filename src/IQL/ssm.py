@@ -11,11 +11,11 @@ For preference weight estimation:
     g: mismatch function
 
 Mismatch function:
-    mismatch = ||preference/|preference| - q_expert/|q_expert|||^2
+    mismatch = ||preference/|preference| - q_values_all/|q_values_all|||^2
 
 Where:
     - preference: h_t (preference weights)
-    - q_expert: expert Q-values from demonstrations
+    - q_values_all: expert Q-values from demonstrations
 
 Implements three approaches:
 1. Particle Filter: Non-parametric sequential Monte Carlo
@@ -30,15 +30,15 @@ from typing import Optional, Callable
 from abc import ABC, abstractmethod
 
 
-def compute_mismatch(preference, q_expert, eps: float = 1e-8):
+def compute_mismatch(preference, q_values_all, eps: float = 1e-8):
     """
     Compute mismatch function between normalized preference and expert Q-values.
 
-    mismatch = ||preference/|preference| - q_expert/|q_expert|||^2
+    mismatch = ||preference/|preference| - q_values_all/|q_values_all|||^2
 
     Args:
         preference: Preference weights [n_objectives] (torch.Tensor or np.ndarray)
-        q_expert: Expert Q-values [n_objectives] (torch.Tensor or np.ndarray)
+        q_values_all: Expert Q-values [n_objectives] (torch.Tensor or np.ndarray)
         eps: Small constant to avoid division by zero
 
     Returns:
@@ -50,21 +50,25 @@ def compute_mismatch(preference, q_expert, eps: float = 1e-8):
         preference_norm = torch.norm(preference, dim=-1, keepdim=True) + eps
         preference_normalized = preference / preference_norm
 
-        q_expert_norm = torch.norm(q_expert, dim=-1, keepdim=True) + eps
-        q_expert_normalized = q_expert / q_expert_norm
+        q_values_all_norm = torch.norm(q_values_all, dim=-1, keepdim=True) + eps
+        q_values_all_normalized = q_values_all / q_values_all_norm
 
         # Compute squared L2 distance
-        mismatch = torch.sum((preference_normalized - q_expert_normalized) ** 2, dim=-1)
+        mismatch = torch.sum(
+            (preference_normalized - q_values_all_normalized) ** 2, dim=-1
+        )
     else:
         # NumPy implementation
         preference_norm = np.linalg.norm(preference, axis=-1, keepdims=True) + eps
         preference_normalized = preference / preference_norm
 
-        q_expert_norm = np.linalg.norm(q_expert, axis=-1, keepdims=True) + eps
-        q_expert_normalized = q_expert / q_expert_norm
+        q_values_all_norm = np.linalg.norm(q_values_all, axis=-1, keepdims=True) + eps
+        q_values_all_normalized = q_values_all / q_values_all_norm
 
         # Compute squared L2 distance
-        mismatch = np.sum((preference_normalized - q_expert_normalized) ** 2, axis=-1)
+        mismatch = np.sum(
+            (preference_normalized - q_values_all_normalized) ** 2, axis=-1
+        )
 
     return mismatch
 
@@ -91,16 +95,16 @@ class StateSpaceModel(ABC):
         self,
         observation: np.ndarray,
         action: np.ndarray,
-        q_expert: np.ndarray,
+        q_values_all: np.ndarray,
         next_observation: np.ndarray,
     ):
         """
-        Update the model given a transition and expert Q-values.
+        Update the model given a transition and Q-values for all actions.
 
         Args:
             observation: Current observation
-            action: Action taken
-            q_expert: Expert Q-values [n_objectives]
+            action: Action taken (discrete)
+            q_values_all: Q-values for all actions [action_dim, n_objectives]
             next_observation: Next observation
         """
         pass
@@ -182,27 +186,35 @@ class ParticleFilter(StateSpaceModel):
 
         return new_particles
 
-    def _compute_likelihood(
-        self, particles: np.ndarray, q_expert: np.ndarray
+    def _compute_action_likelihood(
+        self, particles: np.ndarray, q_values_all: np.ndarray, action: int
     ) -> np.ndarray:
         """
-        Compute likelihood of expert Q-values given particles using mismatch function.
+        Compute likelihood of observed action given particles and Q-values.
 
-        Uses Gaussian likelihood based on mismatch:
-            likelihood ∝ exp(-mismatch / (2 * σ^2))
+        Uses Boltzmann policy: P(a|s,w) = softmax(Q(s,:)^T w)
 
         Args:
             particles: Particle preference weights [n_particles, n_objectives]
-            q_expert: Expert Q-values [n_objectives]
+            q_values_all: Q-values for all actions [action_dim, n_objectives]
+            action: Observed action (discrete)
 
         Returns:
             Likelihoods [n_particles]
         """
-        # Compute mismatch for each particle
         likelihoods = np.zeros(self.n_particles)
         for i in range(self.n_particles):
-            mismatch = compute_mismatch(particles[i], q_expert)
-            likelihoods[i] = np.exp(-mismatch / (2 * self.observation_noise**2))
+            # Compute scalar Q-values: Q^T w for all actions
+            q_scalar = q_values_all @ particles[i]  # [action_dim]
+
+            # Softmax to get action probabilities
+            q_scalar = q_scalar - np.max(q_scalar)  # Numerical stability
+            probs = np.exp(q_scalar / self.observation_noise) / np.sum(
+                np.exp(q_scalar / self.observation_noise)
+            )
+
+            # Likelihood of observed action
+            likelihoods[i] = probs[action] + 1e-10
 
         return likelihoods
 
@@ -235,23 +247,25 @@ class ParticleFilter(StateSpaceModel):
         self,
         observation: np.ndarray,
         action: np.ndarray,
-        q_expert: np.ndarray,
+        q_values_all: np.ndarray,
         next_observation: np.ndarray,
     ):
         """
-        Update particle filter with expert Q-values.
+        Update particle filter using action likelihood.
 
         Args:
             observation: Current observation
-            action: Action taken
-            q_expert: Expert Q-values [n_objectives]
+            action: Action taken (discrete)
+            q_values_all: Q-values for all actions [action_dim, n_objectives]
             next_observation: Next observation
         """
         # Transition particles
         self.particles = self._transition(self.particles)
 
-        # Update weights based on likelihood using mismatch function
-        likelihoods = self._compute_likelihood(self.particles, q_expert)
+        # Update weights based on action likelihood
+        likelihoods = self._compute_action_likelihood(
+            self.particles, q_values_all, int(action)
+        )
         self.weights *= likelihoods
         self.weights += 1e-10  # Avoid zeros
         self.weights /= np.sum(self.weights)
@@ -340,59 +354,39 @@ class ExtendedKalmanFilter(StateSpaceModel):
         self,
         observation: np.ndarray,
         action: np.ndarray,
-        reward: np.ndarray,
+        q_values_all: np.ndarray,
         next_observation: np.ndarray,
     ):
         """
-        Update EKF with new observation.
-
-        Prediction step: Random walk dynamics
-        Update step: Linear measurement model r = w^T * mo_reward
+        Update EKF using action likelihood.
 
         Args:
             observation: Current observation
-            action: Action taken
-            reward: Multi-objective reward [n_objectives]
+            action: Action taken (discrete)
+            q_values_all: Q-values for all actions [action_dim, n_objectives]
             next_observation: Next observation
         """
-        # ===== Prediction Step =====
-        # State transition: w_{t+1} = w_t + noise (random walk)
-        # Mean prediction: mean stays the same
+        # Prediction Step
         mean_pred = self.mean
-
-        # Covariance prediction: P_{t+1|t} = P_t + Q
         covariance_pred = self.covariance + self.Q
 
-        # ===== Update Step =====
-        # Measurement model: z = h(w) + v, where h(w) = w^T * mo_reward
-        # Observation Jacobian: H = h/w = mo_reward^T
-        H = reward.reshape(1, -1)  # [1, n_objectives]
+        # Update using action likelihood
+        q_scalar = q_values_all @ mean_pred
+        q_scalar = q_scalar - np.max(q_scalar)
+        probs = np.exp(q_scalar / self.observation_noise) / np.sum(
+            np.exp(q_scalar / self.observation_noise)
+        )
 
-        # Innovation covariance: S = H * P * H^T + R
-        S = H @ covariance_pred @ H.T + self.R  # [1, 1]
-        S = S.item()
+        action_idx = int(action)
+        q_action = q_values_all[action_idx]
+        q_expected = q_values_all.T @ probs
+        gradient = (q_action - q_expected) / self.observation_noise
 
-        # Kalman gain: K = P * H^T * S^{-1}
-        K = covariance_pred @ H.T / S  # [n_objectives, 1]
-        K = K.flatten()
-
-        # We don't have true scalar reward, so we use the predicted one
-        # In practice, you might have access to demonstrated scalar rewards
-        # For now, we'll use a small update assuming observation H prediction
-        innovation = 0.0  # predicted_reward - predicted_reward
-
-        # State update: mean = mean_pred + K * innovation
-        self.mean = mean_pred + K * innovation
-
-        # Covariance update: P = (I - K * H) * P_pred
-        I_KH = np.eye(self.n_objectives) - np.outer(K, H.flatten())
-        self.covariance = I_KH @ covariance_pred
-
-        # Ensure covariance is symmetric and positive definite
+        step_size = 0.1 * self.observation_noise
+        self.mean = mean_pred + step_size * gradient
+        self.covariance = 0.9 * covariance_pred + 0.1 * self.Q
         self.covariance = (self.covariance + self.covariance.T) / 2
         self.covariance += np.eye(self.n_objectives) * 1e-6
-
-        # Project mean onto simplex
         self.mean = self._project_to_simplex(self.mean)
 
     def reset(self):
@@ -554,7 +548,7 @@ class NeuralSSM(StateSpaceModel):
         self,
         observation: np.ndarray,
         action: np.ndarray,
-        reward: np.ndarray,
+        q_values_all: np.ndarray,
         next_observation: np.ndarray,
     ):
         """
@@ -562,12 +556,16 @@ class NeuralSSM(StateSpaceModel):
 
         Args:
             observation: Current observation
-            action: Action taken
-            reward: Multi-objective reward
+            action: Action taken (discrete)
+            q_values_all: Q-values for all actions [action_dim, n_objectives]
             next_observation: Next observation
         """
+        # Extract Q-value for taken action
+        action_idx = int(action)
+        q_action = q_values_all[action_idx]  # [n_objectives]
+
         # Prepare input
-        input_tensor = self._prepare_input(observation, action, reward)
+        input_tensor = self._prepare_input(observation, action, q_action)
 
         # Forward pass
         predicted_weights, self.hidden = self.model(input_tensor, self.hidden)

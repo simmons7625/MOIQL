@@ -1,65 +1,55 @@
 # Configuration for Objective-Dimensional Soft Inverse Q-Learning (OD-SQIL)
-# Data collection
-expert_dir: "simulation_results/20251020_201002"  # Directory containing config.yaml and trajectories.json
-# Number of trajectories to use from the expert dataset
-n_trajectories: 100
+
+# Expert data source
+# - Environment name is auto-detected from train_dir path (dst_train -> deep_sea_treasure, highway_train -> mo-highway)
+# - All environment settings are loaded from expert_dir/train_dir/config.yaml
+expert_dir: "simulation_results/20251026_201017/"
+n_trajectories: 100  # Number of trajectories to use from expert dataset
 
 # Network architecture
 hidden_dim: 256
 
-# IQL hyperparameters
+# IQL-specific hyperparameters
 lr: 1.0e-4  # Learning rate
 gamma: 0.99  # Discount factor
-mismatch_coef: 0.1  # Coefficient for mismatch regularization term
+mismatch_coef: 1.0  # Coefficient for mismatch regularization term
 tau: 0.005  # Expectile parameter for value function update
 
 # Training settings
 batch_size: 1  # Batch size for critic updates
-actor_batch_size: 10  # Batch size for actor updates (default: batch_size * 10)
+actor_batch_size: 8  # Batch size for actor updates
 n_updates: 10000  # Total number of training updates
 
-# State Space Model (SSM) settings
-ssm_type: "pf"  # Options: "pf", "ekf", "neural"
+# State Space Model (SSM) for preference prediction
+ssm_type: "neural"  # Options: "pf" (particle filter), "ekf" (extended kalman filter), "neural"
 
 # Particle Filter settings (used if ssm_type == "pf")
 particle_filter:
   n_particles: 1000
   process_noise: 0.01
-  observation_noise: 0.1
-  initial_noise: 0.5
+  observation_noise: 0.05
+  initial_noise: 1.0
 
 # Extended Kalman Filter settings (used if ssm_type == "ekf")
 ekf:
   process_noise: 0.01
   observation_noise: 0.1
-  initial_covariance: 1.0
+  initial_variance: 0.1
 
-# Neural SSM settings (used if ssm_type == "neural_ssm")
+# Neural SSM settings (used if ssm_type == "neural")
 neural_ssm:
   hidden_dim: 64
+  n_layers: 2
   learning_rate: 0.001
-  process_noise: 0.01
-  observation_noise: 0.1
 
-# Preference function settings (for environment wrapper)
-contenous_decay: 0.01  # Linear decay rate for preference weights
-init_weight: [0.8, 0.2]  # Initial weights for objectives [obj1, obj2]
+# Device
+device: "cuda"
 
-# Highway-specific settings (only used if env_name == "mo-highway")
-safety_distance_threshold: 10.0  # Distance threshold for safety switching
-safety_boost_factor: 1.5  # Factor to boost safety weight when close to cars
-
-# Device settings
-device: "cuda"  # "cuda" or "cpu"
-
-# Logging and saving
+# Logging
 use_wandb: false
 wandb_project: "MOIQL"
 save_dir: "moiql_results"
 
-# Episode settings
-max_timesteps: 100  # Max timesteps per episode. null means no limit use done signal only
-
-# Evaluation settings
-eval_interval: 500  # Evaluate every N updates
+# Evaluation
+eval_interval: 1000  # Evaluate every N updates
 eval_episodes: 100  # Number of episodes for evaluation

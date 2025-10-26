@@ -1,0 +1,33 @@
+# Reward function settings - time-varying preference
+contenous_decay: 0.01  # Continuous linear decay rate for treasure weight
+init_weight: [1.0, 0.0]  # Initial weight for [treasure, time]
+
+# Deep Sea Treasure-specific settings
+max_timesteps: null  # Max timesteps per episode (null = use done signal)
+max_num_treasure: 3  # Max number of treasures to collect. All treasures disappear when reached
+use_local_obs: true  # Use local observation instead of position
+local_obs_size: 5  # Size of local observation grid (5 = 5x5 grid)
+
+# Model architecture
+hidden_dim: 256
+
+# PPO hyperparameters
+lr: 1.0e-4  # Learning rate
+gamma: 0.999  # Discount factor
+gae_lambda: 0.95  # GAE lambda parameter
+clip_epsilon: 0.1  # PPO clip epsilon
+vf_coef: 0.5  # Value function coefficient
+ent_coef: 0.01  # Entropy coefficient
+max_grad_norm: 0.5  # Max gradient norm for clipping
+
+# Training settings
+n_updates: 1000  # Number of PPO updates
+n_rollouts_per_update: 10  # Number of episodes per update
+n_epochs: 5  # Number of epochs per update
+batch_size: 256  # Batch size for updates
+
+# Save settings
+save_dir: "dst_train"
+
+# Device
+device: "cuda"  # cuda or cpu

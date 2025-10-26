@@ -1,5 +1,5 @@
 """
-Simulation script to collect trajectory data using trained PPO model.
+Simulation script to collect trajectory data using trained PPO model for Deep Sea Treasure.
 """
 
 import argparse
@@ -14,14 +14,9 @@ import yaml
 from tqdm import tqdm
 
 import mo_gymnasium as gym
-from src.Env.deepseatreasure import DeepSeaTreasureWrapper
-from src.Env.highway import HighwayWrapper
-from src.Env.reward_function import (
-    DSTPreferenceFunction,
-    HighwayPreferenceFunction,
-    RewardFunction,
-)
-from src.RL.model import ActorCritic
+from src.dst.env import DeepSeaTreasureWrapper
+from src.dst.reward_function import RewardFunction, DSTPreferenceFunction
+from src.dst.model import ActorCritic
 
 
 def load_config(config_path: str) -> dict:
@@ -38,7 +33,7 @@ def load_model(
     hidden_dim: int,
     device: str = "cuda",
 ) -> ActorCritic:
-    """Load trained model from checkpoint."""
+    """Load trained PPO model from checkpoint."""
     model = ActorCritic(obs_dim, action_dim, hidden_dim).to(device)
     checkpoint = torch.load(model_path, map_location=device)
     model.load_state_dict(checkpoint["ac_state_dict"])
@@ -47,45 +42,34 @@ def load_model(
 
 
 def create_environment(
-    env_name: str,
     contenous_decay: float,
     init_weight: float,
-    safety_distance_threshold: float = 10.0,
-    safety_boost_factor: float = 1.5,
+    max_timesteps: int = None,
+    max_num_treasure: int = 1,
+    use_local_obs: bool = True,
+    local_obs_size: int = 3,
+    render_mode: str = None,
+    render_fps: int = 10,
 ):
-    """Create environment with reward function."""
+    """Create Deep Sea Treasure environment with reward function."""
     # Create reward function with time-varying preference
-    if env_name == "deep_sea_treasure":
-        preference_fn = DSTPreferenceFunction(
-            contenous_decay=contenous_decay,
-            init_treasure_weight=init_weight,
-        )
-    elif env_name == "mo-highway":
-        preference_fn = HighwayPreferenceFunction(
-            init_speed_weight=init_weight,
-            safety_distance_threshold=safety_distance_threshold,
-            safety_boost_factor=safety_boost_factor,
-        )
-    else:
-        raise ValueError(f"Unsupported environment: {env_name}")
-
+    preference_fn = DSTPreferenceFunction(
+        contenous_decay=contenous_decay,
+        init_treasure_weight=init_weight,
+    )
     reward_fn = RewardFunction(preference_fn=preference_fn)
 
     # Create environment
-    if env_name == "deep_sea_treasure":
-        # Enable ignore_done for DST to ensure fixed-length episodes
-        env = DeepSeaTreasureWrapper(
-            env=gym.make("deep-sea-treasure-v0"),
-            reward_fn=reward_fn,
-            ignore_done=True,
-        )
-    elif env_name == "mo-highway":
-        env = HighwayWrapper(
-            env=gym.make("mo-highway-v0"),
-            reward_fn=reward_fn,
-        )
-    else:
-        raise ValueError(f"Unsupported environment: {env_name}")
+    env = DeepSeaTreasureWrapper(
+        env=gym.make("deep-sea-treasure-v0", render_mode=render_mode),
+        reward_fn=reward_fn,
+        max_num_treasure=max_num_treasure,
+        max_timestep=max_timesteps,
+        use_local_obs=use_local_obs,
+        local_obs_size=local_obs_size,
+        render_mode=render_mode,
+        render_fps=render_fps,
+    )
 
     return env, reward_fn
 
@@ -103,7 +87,7 @@ def collect_trajectory(
 
     Args:
         env: Environment
-        model: Trained policy model
+        model: Trained PPO policy model
         reward_fn: Reward function for computing scalar rewards
         device: Device to run model on
         max_episode_steps: Maximum timesteps per episode (None = use done signal only)
@@ -123,6 +107,7 @@ def collect_trajectory(
     }
 
     obs, info = env.reset()
+    reward_fn.reset()
     episode_step = 0
 
     while True:
@@ -143,7 +128,8 @@ def collect_trajectory(
                 action = dist.sample().item()
 
         # Take action in environment
-        next_obs, reward, done, truncated, info = env.step(action)
+        next_obs, reward, terminated, truncated, info = env.step(action)
+        done = terminated or truncated
 
         # Store transition
         mo_reward = info.get("mo_reward", None)
@@ -152,7 +138,7 @@ def collect_trajectory(
         trajectory["rewards"].append(reward)
         trajectory["mo_rewards"].append(mo_reward)
         trajectory["preference_weights"].append(info.get("preference_weights", None))
-        trajectory["dones"].append(done or truncated)
+        trajectory["dones"].append(done)
         trajectory["infos"].append(info)
 
         obs = next_obs
@@ -163,7 +149,7 @@ def collect_trajectory(
             if episode_step >= max_episode_steps:
                 break
         else:
-            if done or truncated:
+            if done:
                 break
 
     # Convert lists to numpy arrays where appropriate
@@ -205,32 +191,31 @@ def simulate(config: dict):
     output_dir = config["output_dir"]
     deterministic = config.get("deterministic", False)
     device = config.get("device", "cuda")
+    render = config.get("render", False)
+    render_fps = config.get("render_fps", 10)
 
-    # Create environment
     # Handle init_weight - can be a list or scalar
-    init_weight = training_config.get(
-        "init_weight", training_config.get("init_treasure_weight", 0.8)
-    )
+    init_weight = training_config.get("init_weight", 0.8)
     if isinstance(init_weight, list):
         init_weight = init_weight[0]  # Use first element for initial weight
 
+    # Create environment
     env, reward_fn = create_environment(
-        env_name=training_config["env_name"],
         contenous_decay=training_config["contenous_decay"],
         init_weight=init_weight,
-        safety_distance_threshold=training_config.get(
-            "safety_distance_threshold", 10.0
-        ),
-        safety_boost_factor=training_config.get("safety_boost_factor", 1.5),
+        max_timesteps=training_config.get("max_timesteps"),
+        max_num_treasure=training_config.get("max_num_treasure", 1),
+        use_local_obs=training_config.get("use_local_obs", True),
+        local_obs_size=training_config.get("local_obs_size", 3),
+        render_mode="human" if render else None,
+        render_fps=render_fps,
     )
-    print(f"Created environment: {training_config['env_name']}")
+    print("Created environment: Deep Sea Treasure")
 
     # Get environment dimensions
-    # Handle observation space - flatten if multi-dimensional
     if len(env.observation_space.shape) == 1:
         obs_dim = env.observation_space.shape[0]
     else:
-        # Flatten multi-dimensional observations (e.g., highway's (5,5) -> 25)
         obs_dim = int(np.prod(env.observation_space.shape))
 
     action_dim = env.action_space.n
@@ -342,7 +327,7 @@ def simulate(config: dict):
 def main():
     """Main function for simulation."""
     parser = argparse.ArgumentParser(
-        description="Simulate trajectories using trained PPO model"
+        description="Simulate trajectories using trained SAC model for Deep Sea Treasure"
     )
     parser.add_argument(
         "--config",

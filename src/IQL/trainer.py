@@ -82,13 +82,8 @@ class ODSQILTrainer:
         ).to(self.device)
         self.q_target.load_state_dict(self.q_network.state_dict())
 
-        # Separate optimizers for Q-network and actor
-        self.q_optimizer = torch.optim.Adam(self.q_network.critic.parameters(), lr=lr)
-        self.actor_optimizer = torch.optim.Adam(
-            list(self.q_network.shared.parameters())
-            + list(self.q_network.actor.parameters()),
-            lr=lr,
-        )
+        # Optimizer for Q-network (no separate actor optimizer)
+        self.q_optimizer = torch.optim.Adam(self.q_network.parameters(), lr=lr)
 
         # Tracking
         self.current_preference = np.ones(n_objectives) / n_objectives
@@ -101,52 +96,6 @@ class ODSQILTrainer:
             target_param.data.copy_(
                 self.tau * param.data + (1 - self.tau) * target_param.data
             )
-
-    def compute_actor_loss(
-        self,
-        states: torch.Tensor,
-        actions: torch.Tensor,
-        preference_weights: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Compute actor loss for discrete actions: log π(a|s) - Q(s,a)
-
-        Args:
-            states: [batch, obs_dim]
-            actions: [batch] - discrete actions taken
-            preference_weights: [batch, n_objectives]
-
-        Returns:
-            Actor loss tensor
-        """
-        # Get policy logits and Q-values
-        logits, q_values = self.q_network.act(
-            states
-        )  # logits: [batch, action_dim], q_values: [batch, action_dim, n_objectives]
-
-        # Get log probabilities for actions taken
-        log_probs = torch.log_softmax(logits, dim=-1)  # [batch, action_dim]
-        log_probs_taken = log_probs.gather(1, actions.unsqueeze(-1)).squeeze(
-            -1
-        )  # [batch]
-
-        # Get Q-values for actions taken
-        # q_values: [batch, action_dim, n_objectives]
-        actions_idx = actions.unsqueeze(-1).unsqueeze(-1)  # [batch, 1, 1]
-        actions_idx = actions_idx.expand(
-            -1, -1, self.n_objectives
-        )  # [batch, 1, n_objectives]
-        q_taken = q_values.gather(1, actions_idx).squeeze(1)  # [batch, n_objectives]
-
-        # Compute scalar Q-values using preference weights
-        # q_taken: [batch, n_objectives]
-        # preference_weights: [batch, n_objectives]
-        q_scalar = torch.einsum("bo,bo->b", q_taken, preference_weights)  # [batch]
-
-        # Actor loss: log π(a|s) - Q(s,a) for actions taken
-        actor_loss = (log_probs_taken - q_scalar).mean()
-
-        return actor_loss
 
     def compute_soft_iq_loss(
         self,
@@ -304,22 +253,20 @@ class ODSQILTrainer:
         preference_weights = np.zeros((batch_size, self.n_objectives))
 
         for i in range(batch_size):
-            # Get Q-values to use as "expert Q" for SSM update
+            # Get Q-values for all actions for SSM update
             with torch.no_grad():
-                _, q_values_all = self.q_network.act(
+                _, q_values_all_batch = self.q_network.act(
                     states_t[i : i + 1]
                 )  # [1, action_dim, n_objectives]
-                # Get Q-value for the action taken
-                action_idx = int(actions[i])
-                q_expert = (
-                    q_values_all[0, action_idx, :].cpu().numpy()
-                )  # [n_objectives]
+                q_values_all = (
+                    q_values_all_batch[0].cpu().numpy()
+                )  # [action_dim, n_objectives]
 
-            # Update SSM
+            # Update SSM with action likelihood
             self.ssm.update(
                 observation=states[i],
                 action=actions[i],
-                q_expert=q_expert,
+                q_values_all=q_values_all,
                 next_observation=next_states[i],
             )
 
@@ -397,18 +344,20 @@ class ODSQILTrainer:
             # Take step
             next_obs, reward, terminated, truncated, info = env.step(action)
 
-            # Update SSM with current Q-values for the action taken
+            # Update SSM with Q-values for all actions
             with torch.no_grad():
                 obs_t = torch.FloatTensor(obs).unsqueeze(0).to(self.device)
-                _, q_values_all = self.q_network.act(
+                _, q_values_all_batch = self.q_network.act(
                     obs_t
                 )  # [1, action_dim, n_objectives]
-                q_expert = q_values_all[0, action, :].cpu().numpy()  # [n_objectives]
+                q_values_all = (
+                    q_values_all_batch[0].cpu().numpy()
+                )  # [action_dim, n_objectives]
 
             self.ssm.update(
                 observation=obs,
                 action=action,
-                q_expert=q_expert,
+                q_values_all=q_values_all,
                 next_observation=next_obs,
             )
 
@@ -429,38 +378,6 @@ class ODSQILTrainer:
             "preference_weights": np.array(preference_weights),
         }
 
-    def update_actor(
-        self,
-        states: np.ndarray,
-        actions: np.ndarray,
-        preference_weights: np.ndarray,
-    ) -> float:
-        """
-        Update actor (policy) using self-generated rollouts.
-
-        Args:
-            states: [batch, obs_dim] from self-generated rollouts
-            actions: [batch] actual actions taken
-            preference_weights: [batch, n_objectives] predicted preferences
-
-        Returns:
-            Actor loss value
-        """
-        # Convert to tensors
-        states_t = torch.FloatTensor(states).to(self.device)
-        actions_t = torch.LongTensor(actions).to(self.device)
-        preference_weights_t = torch.FloatTensor(preference_weights).to(self.device)
-
-        # Compute actor loss
-        actor_loss = self.compute_actor_loss(states_t, actions_t, preference_weights_t)
-
-        # Backward pass for actor
-        self.actor_optimizer.zero_grad()
-        actor_loss.backward()
-        self.actor_optimizer.step()
-
-        return actor_loss.item()
-
     def save(self, path: str):
         """Save model checkpoint."""
         save_path = Path(path)
@@ -471,7 +388,6 @@ class ODSQILTrainer:
                 "q_network": self.q_network.state_dict(),
                 "q_target": self.q_target.state_dict(),
                 "q_optimizer": self.q_optimizer.state_dict(),
-                "actor_optimizer": self.actor_optimizer.state_dict(),
                 "current_preference": self.current_preference,
             },
             save_path,
@@ -483,5 +399,4 @@ class ODSQILTrainer:
         self.q_network.load_state_dict(checkpoint["q_network"])
         self.q_target.load_state_dict(checkpoint["q_target"])
         self.q_optimizer.load_state_dict(checkpoint["q_optimizer"])
-        self.actor_optimizer.load_state_dict(checkpoint["actor_optimizer"])
         self.current_preference = checkpoint["current_preference"]
