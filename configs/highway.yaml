@@ -1,5 +1,5 @@
 # Reward function settings - time-varying preference
-init_weight: [1.0, 0.0]  # Initial weight for [treasure/speed] or [time/safety]
+init_weight: [0.8, 0.2]  # Initial weight for [treasure/speed] or [time/safety]
 
 # Highway-specific settings (only used when env_name is "highway")
 safety_distance_threshold: 10.0  # Distance threshold for safety switching

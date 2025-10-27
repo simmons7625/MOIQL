@@ -42,7 +42,6 @@ def load_model(
 
 
 def create_environment(
-    contenous_decay: float,
     init_weight: float,
     safety_distance_threshold: float = 10.0,
     safety_boost_factor: float = 1.5,
@@ -58,9 +57,20 @@ def create_environment(
     )
     reward_fn = RewardFunction(preference_fn=preference_fn)
 
-    # Create environment
+    # Create environment with unnormalized observations
+    # This is necessary for distance-based preference switching
+    highway_config = {
+        "observation": {
+            "type": "Kinematics",
+            "vehicles_count": 5,
+            "features": ["x", "y", "vx", "vy", "cos_h", "sin_h"],
+            "normalize": False,  # Keep actual positions/velocities for distance computation
+            "absolute": False,
+            "order": "sorted",
+        }
+    }
     env = HighwayWrapper(
-        env=gym.make("mo-highway-v0", render_mode=render_mode),
+        env=gym.make("mo-highway-v0", render_mode=render_mode, config=highway_config),
         reward_fn=reward_fn,
         render_mode=render_mode,
         render_fps=render_fps,
@@ -196,7 +206,6 @@ def simulate(config: dict):
 
     # Create environment
     env, reward_fn = create_environment(
-        contenous_decay=training_config["contenous_decay"],
         init_weight=init_weight,
         safety_distance_threshold=training_config.get(
             "safety_distance_threshold", 10.0

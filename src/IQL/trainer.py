@@ -236,16 +236,10 @@ class ODSQILTrainer:
         # Convert to tensors
         states_t = torch.FloatTensor(states).to(self.device)
         actions_t = torch.LongTensor(actions).to(self.device)
-        _rewards_t = torch.FloatTensor(rewards).to(self.device)  # For future use
         next_states_t = torch.FloatTensor(next_states).to(self.device)
-        _dones_t = torch.FloatTensor(dones).to(self.device)  # For future use
-        _is_expert_t = torch.FloatTensor(is_expert).to(self.device)  # For future use
 
         # Convert initial states to tensors
         initial_states_t = torch.FloatTensor(initial_states).to(self.device)
-        _initial_actions_t = torch.LongTensor(initial_actions).to(
-            self.device
-        )  # For future use
         initial_preferences_t = torch.FloatTensor(initial_preferences).to(self.device)
 
         # Update SSM to get current preference estimate for each transition
@@ -304,79 +298,6 @@ class ODSQILTrainer:
         }
 
         return losses
-
-    def collect_rollout(self, env):
-        """
-        Collect a rollout using current policy.
-
-        Args:
-            env: Environment to collect from
-
-        Returns:
-            Dictionary with states, actions, and preference_weights
-        """
-        states = []
-        actions = []
-        preference_weights = []
-
-        obs, _ = env.reset()
-        self.ssm.reset()
-        episode_step = 0
-
-        while True:
-            # Get action from policy
-            with torch.no_grad():
-                obs_t = torch.FloatTensor(obs).unsqueeze(0).to(self.device)
-                logits, q_values_all = self.q_network.act(
-                    obs_t
-                )  # [1, action_dim], [1, action_dim, n_objectives]
-                probs = torch.softmax(logits, dim=-1)
-                action = torch.multinomial(probs, 1).item()
-
-            # Get preference prediction
-            pref = self.ssm.predict(obs, action)
-
-            # Store transition
-            states.append(obs)
-            actions.append(action)
-            preference_weights.append(pref)
-
-            # Take step
-            next_obs, reward, terminated, truncated, info = env.step(action)
-
-            # Update SSM with Q-values for all actions
-            with torch.no_grad():
-                obs_t = torch.FloatTensor(obs).unsqueeze(0).to(self.device)
-                _, q_values_all_batch = self.q_network.act(
-                    obs_t
-                )  # [1, action_dim, n_objectives]
-                q_values_all = (
-                    q_values_all_batch[0].cpu().numpy()
-                )  # [action_dim, n_objectives]
-
-            self.ssm.update(
-                observation=obs,
-                action=action,
-                q_values_all=q_values_all,
-                next_observation=next_obs,
-            )
-
-            obs = next_obs
-            episode_step += 1
-
-            # Check termination: use max_timesteps if set, otherwise use done signal
-            if self.max_timesteps is not None:
-                if episode_step >= self.max_timesteps:
-                    break
-            else:
-                if terminated or truncated:
-                    break
-
-        return {
-            "states": np.array(states),
-            "actions": np.array(actions),
-            "preference_weights": np.array(preference_weights),
-        }
 
     def save(self, path: str):
         """Save model checkpoint."""

@@ -77,16 +77,27 @@ class PPOTrainer:
         )
         reward_fn = RewardFunction(preference_fn=preference_fn)
 
-        # Create Highway environment
+        # Create Highway environment with unnormalized observations
+        # This is necessary for distance-based preference switching
+        highway_config = {
+            "observation": {
+                "type": "Kinematics",
+                "vehicles_count": 5,
+                "features": ["x", "y", "vx", "vy", "cos_h", "sin_h"],
+                "normalize": False,  # Keep actual positions/velocities for distance computation
+                "absolute": False,
+                "order": "sorted",
+            }
+        }
         self.env = HighwayWrapper(
-            env=gym.make("mo-highway-v0"),
+            env=gym.make("mo-highway-v0", config=highway_config),
             reward_fn=reward_fn,
         )
         # Handle observation space - flatten if multi-dimensional
         if len(self.env.observation_space.shape) == 1:
             obs_dim = self.env.observation_space.shape[0]
         else:
-            # Flatten multi-dimensional observations (e.g., highway's (5,5) -> 25)
+            # Flatten multi-dimensional observations (e.g., highway's (5,6) -> 30)
             obs_dim = int(np.prod(self.env.observation_space.shape))
 
         action_dim = self.env.action_space.n

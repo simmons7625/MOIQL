@@ -79,13 +79,13 @@ class HighwayWrapper(gym.Wrapper):
         Compute distance to nearest forward car from observation.
         Highway-env observation shape is (num_vehicles, features).
         The ego vehicle is at index 0, other vehicles start from index 1.
-        Features typically include [x, y, vx, vy, cos_h, sin_h].
+        Features: [x, y, vx, vy, cos_h, sin_h] (6 features).
         Only considers vehicles ahead of the ego vehicle (x > ego_x).
         """
         if len(obs.shape) == 1:
             # Flattened observation, need to reshape
-            # Highway-env default is 5 vehicles x 5 features = 25
-            num_features = 5
+            # With 6 features: 5 vehicles x 6 features = 30
+            num_features = 6
             obs = obs.reshape(-1, num_features)
 
         if obs.shape[0] <= 1:
