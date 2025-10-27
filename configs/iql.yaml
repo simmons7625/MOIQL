@@ -21,7 +21,7 @@ actor_batch_size: 8  # Batch size for actor updates
 n_updates: 10000  # Total number of training updates
 
 # State Space Model (SSM) for preference prediction
-ssm_type: "neural"  # Options: "pf" (particle filter), "ekf" (extended kalman filter), "neural"
+ssm_type: "pf"  # Options: "pf" (particle filter), "ekf" (extended kalman filter), "neural"
 
 # Particle Filter settings (used if ssm_type == "pf")
 particle_filter:

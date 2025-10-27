@@ -192,7 +192,7 @@ class ODSQILTrainer:
         # ===== Mismatch Regularization =====
         # For expert data, add mismatch between predicted preference and expert Q direction
         mismatch_loss = compute_mismatch(
-            preference=preference_weights, q_expert=q_current
+            preference=preference_weights, q_values_all=q_current
         ).mean()
 
         # ===== Total Loss =====
