@@ -219,13 +219,19 @@ class MambaSSM(nn.Module):
         return preferences.cpu().numpy()
 
     def reset_params(self):
-        """Reset model parameters."""
+        """Initialize model parameters with Xavier/Kaiming initialization."""
 
-        def reset_layer(layer):
-            if hasattr(layer, "reset_parameters"):
-                layer.reset_parameters()
+        def init_weights(m):
+            if isinstance(m, nn.Linear):
+                # Xavier uniform initialization for linear layers
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
 
-        self.apply(reset_layer)
+        self.apply(init_weights)
+
+        # Reinitialize A_log parameter
+        nn.init.normal_(self.A_log, mean=0.0, std=1.0)
 
     def train(
         self,
