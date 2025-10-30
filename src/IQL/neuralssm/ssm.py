@@ -27,7 +27,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 from typing import Callable
-from abc import ABC, abstractmethod
 
 
 def compute_mismatch(vec1, vec2, eps: float = 1e-8):
@@ -186,47 +185,6 @@ def numeric_jacobian(f: Callable, x: np.ndarray, eps: float = 1e-6) -> np.ndarra
     return J
 
 
-class StateSpaceModel(ABC):
-    """Abstract base class for state space models."""
-
-    @abstractmethod
-    def predict(self, observation: np.ndarray, hidden_state: np.ndarray) -> np.ndarray:
-        """
-        Predict preference weights given observation and action.
-
-        Args:
-            observation: Current observation
-            hidden_state: Current hidden state
-
-        Returns:
-            Predicted preference weights
-        """
-        pass
-
-    @abstractmethod
-    def update(
-        self,
-        observation: np.ndarray,
-        action: np.ndarray,
-        q_values_all: np.ndarray,
-    ):
-        """
-        Update the model to maximize margin: -(mismatch(q_expert, w) - mean(mismatch(q_other, w))).
-
-        Args:
-            observation: Current observation
-            action: Action taken (discrete) - expert action
-            next_observation: Next observation
-            q_values_all: Q-values for all actions [action_dim, n_objectives]
-        """
-        pass
-
-    @abstractmethod
-    def reset(self):
-        """Reset the model state."""
-        pass
-
-
 class Mamba(nn.Module):
     """Simplified Mamba block with selective state-space model."""
 
@@ -281,7 +239,7 @@ class Mamba(nn.Module):
         return output, h
 
 
-class MambaSSM(StateSpaceModel):
+class MambaSSM:
     """
     Mamba State Space Model for preference weight prediction.
 
@@ -290,6 +248,9 @@ class MambaSSM(StateSpaceModel):
     - Selective state-space mechanism with input-dependent parameters
     - Output: logits -> softmax -> preference weights (ensures simplex constraint)
     - Training: sequence-wise (no step-by-step update needed)
+
+    Note: Does not inherit from StateSpaceModel as it uses sequence-wise processing
+    rather than step-by-step predict/update interface.
     """
 
     def __init__(

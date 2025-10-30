@@ -51,6 +51,7 @@ Thumbs.db
 moiql_results/
 dst_train/
 highway_train/
-simulation_results/
+simulation_rl/
+simulation_iql/
 paper/
 tex temprate for paper/

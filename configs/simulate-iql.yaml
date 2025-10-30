@@ -1,7 +1,7 @@
 # Simulation configuration for trajectory collection
 # Model settings
-train_dir: "highway_train/20251026_200156/"  # Path to trained model directory
-model_path: 'final_model.pt'  # Filename of the trained model
+train_dir: "moiql_results/ekf_success/"  # Path to trained model directory
+model_path: 'best_model.pt'  # Filename of the trained model
 training_config: "config.yaml"  # Path to training config (for environment setup)
 
 # Simulation settings
@@ -13,4 +13,4 @@ render_fps: 1  # Frames per second when rendering
 device: "cuda"  # cuda or cpu
 
 # Output settings
-output_dir: "simulation_results"  # Directory to save trajectory data
+output_dir: "simulation_iql"  # Directory to save trajectory data

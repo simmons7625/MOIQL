@@ -3,7 +3,7 @@
 # Expert data source
 # - Environment name is auto-detected from train_dir path (dst_train -> deep_sea_treasure, highway_train -> mo-highway)
 # - All environment settings are loaded from expert_dir/train_dir/config.yaml
-expert_dir: "simulation_results/20251026_201017/"
+expert_dir: "simulation_rl/20251026_201017/"
 n_trajectories: 100  # Number of trajectories to use from expert dataset
 
 # Network architecture
@@ -12,7 +12,7 @@ hidden_dim: 256
 # IQL-specific hyperparameters
 lr: 1.0e-5  # Learning rate
 gamma: 0.99  # Discount factor
-mismatch_coef: 100.0  # Coefficient for mismatch regularization term (0 = disabled, SSM handles preference learning)
+mismatch_coef: 10.0  # Coefficient for mismatch regularization term (0 = disabled, SSM handles preference learning)
 tau: 0.005  # Expectile parameter for value function update
 
 # Training settings
@@ -38,7 +38,7 @@ ekf:
 # Mamba SSM settings (use if ssm_type == "mamba")
 mamba:
   hidden_dim: 128
-  learning_rate: 1.0e-5
+  learning_rate: 1.0e-4
 
 # Device
 device: "cuda"

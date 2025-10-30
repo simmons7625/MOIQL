@@ -349,3 +349,176 @@ class SSMIQTrainer:
         self.current_preference = checkpoint["current_preference"]
 
         # Non-neural SSMs (PF, EKF) don't need separate loading
+
+    def evaluate(
+        self,
+        expert_dir: str,
+        n_trajectories: int = 10,
+        save_dir: str = None,
+        update_step: int = None,
+        eval_weights: np.ndarray = None,
+    ):
+        """
+        Evaluate preference prediction accuracy on expert trajectories.
+
+        Uses step-wise prediction for simple SSMs (ParticleFilter, EKF).
+
+        Args:
+            expert_dir: Directory containing trajectories.json
+            n_trajectories: Number of trajectories to evaluate
+            save_dir: Directory to save detailed predictions (optional)
+            update_step: Current update step for logging (optional)
+            eval_weights: Weights [w1, w2] for eval_score = w1*cross_entropy + w2*preference_mae
+
+        Returns:
+            Dictionary containing evaluation metrics
+        """
+        import json
+
+        # Load trajectories
+        expert_path = Path(expert_dir)
+        traj_path = expert_path / "trajectories.json"
+
+        with open(traj_path, "r") as f:
+            all_trajectories = json.load(f)
+
+        # Sample trajectories
+        n_available = len(all_trajectories)
+        n_eval = min(n_trajectories, n_available)
+        indices = np.random.choice(n_available, n_eval, replace=False)
+        eval_trajectories = [all_trajectories[i] for i in indices]
+
+        preference_errors = []
+        cross_entropy_losses = []
+        detailed_predictions = []
+        eval_scores = []
+
+        # Process each trajectory
+        for traj_idx, traj in enumerate(eval_trajectories):
+            traj_states = np.array(traj["observations"])
+            traj_actions = np.array(traj["actions"])
+            traj_prefs = np.array(traj["preference_weights"])
+
+            # Reset SSM for step-wise processing
+            self.ssm.reset()
+
+            traj_predictions = []
+            traj_cross_entropies = []
+
+            for t in range(len(traj_actions)):
+                state = traj_states[t]
+                action = traj_actions[t]
+                true_pref = traj_prefs[t]
+
+                # Get predicted preference (before update)
+                if hasattr(self.ssm, "hidden"):
+                    result = self.ssm.predict(state, self.ssm.hidden)
+                    if isinstance(result, tuple):
+                        pred_pref, _ = result
+                    else:
+                        pred_pref = result
+                else:
+                    pred_pref = self.ssm.predict(state, None)
+
+                with torch.no_grad():
+                    state_t = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+                    pred_pref_t = (
+                        torch.FloatTensor(pred_pref).unsqueeze(0).to(self.device)
+                    )
+                    action_t = torch.LongTensor([action]).to(self.device)
+
+                    logits, q_values_all_batch = self.q_network.act(
+                        state_t, pred_pref_t
+                    )
+                    q_values_all = q_values_all_batch[0].cpu().numpy()
+
+                    policy_probs = torch.softmax(logits[0], dim=0)
+
+                    ce_loss = torch.nn.functional.cross_entropy(
+                        logits, action_t, reduction="none"
+                    )
+                    traj_cross_entropies.append(ce_loss.item())
+
+                # Update SSM with Q-values
+                self.ssm.update(
+                    observation=state, action=action, q_values_all=q_values_all
+                )
+
+                pref_error = np.abs(pred_pref[0] - true_pref[0])
+                preference_errors.append(pref_error)
+
+                traj_predictions.append(
+                    {
+                        "timestep": int(t),
+                        "state": state.tolist(),
+                        "action": int(action),
+                        "ground_truth_preference": true_pref.tolist(),
+                        "predicted_preference": pred_pref.tolist(),
+                        "policy_probs": policy_probs.cpu().numpy().tolist(),
+                        "mae_preference": float(pref_error),
+                        "cross_entropy": float(traj_cross_entropies[-1]),
+                    }
+                )
+
+            mean_traj_ce = np.mean(traj_cross_entropies)
+            cross_entropy_losses.append(mean_traj_ce)
+
+            if eval_weights is not None:
+                traj_pref_errors = preference_errors[-(len(traj_actions)) :]
+                traj_pref_mae = np.mean(traj_pref_errors)
+                scores = np.array([mean_traj_ce, traj_pref_mae])
+                traj_eval_score = np.dot(eval_weights, scores)
+                eval_scores.append(traj_eval_score)
+
+            traj_pred_dict = {
+                "trajectory_idx": int(traj_idx),
+                "trajectory_length": len(traj_actions),
+                "mean_cross_entropy": float(mean_traj_ce),
+                "predictions": traj_predictions,
+            }
+            if eval_weights is not None:
+                traj_pred_dict["eval_score"] = float(traj_eval_score)
+
+            detailed_predictions.append(traj_pred_dict)
+
+        results = {
+            "mean_preference_mae": np.mean(preference_errors),
+            "std_preference_mae": np.std(preference_errors),
+            "mean_cross_entropy": np.mean(cross_entropy_losses),
+            "std_cross_entropy": np.std(cross_entropy_losses),
+        }
+
+        if eval_weights is not None:
+            results["mean_eval_score"] = np.mean(eval_scores)
+            results["std_eval_score"] = np.std(eval_scores)
+
+        # Save detailed predictions
+        if save_dir is not None:
+            save_path = Path(save_dir)
+            save_path.mkdir(parents=True, exist_ok=True)
+
+            if update_step is not None:
+                json_filename = f"step_{update_step}.json"
+            else:
+                json_filename = "eval_predictions.json"
+
+            json_path = save_path / json_filename
+
+            eval_data = {
+                "mean_preference_mae": results["mean_preference_mae"],
+                "std_preference_mae": results["std_preference_mae"],
+                "mean_cross_entropy": results["mean_cross_entropy"],
+                "std_cross_entropy": results["std_cross_entropy"],
+                "trajectories": detailed_predictions,
+            }
+
+            if "mean_eval_score" in results:
+                eval_data["mean_eval_score"] = results["mean_eval_score"]
+                eval_data["std_eval_score"] = results["std_eval_score"]
+
+            with open(json_path, "w") as f:
+                json.dump(eval_data, f, indent=2)
+
+            print(f"Saved detailed predictions to {json_path}")
+
+        return results

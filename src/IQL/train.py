@@ -29,7 +29,6 @@ from src.IQL.neuralssm.trainer import NeuralSSMIQTrainer
 from src.IQL.neuralssm.ssm import MambaSSM
 
 # Common evaluation function
-from src.IQL.evaluation import evaluate
 
 # Suppress warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="pygame.pkgdata")
@@ -414,8 +413,7 @@ def train(config: Dict[str, Any]):
                 if eval_weights_config is not None
                 else None
             )
-            eval_metrics = evaluate(
-                trainer,
+            eval_metrics = trainer.evaluate(
                 expert_dir=str(expert_dir),
                 n_trajectories=config.get("n_trajectories"),
                 save_dir=str(results_dir / "eval_predictions"),

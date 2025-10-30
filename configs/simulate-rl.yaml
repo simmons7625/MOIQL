@@ -13,4 +13,4 @@ render_fps: 1  # Frames per second when rendering
 device: "cuda"  # cuda or cpu
 
 # Output settings
-output_dir: "simulation_results"  # Directory to save trajectory data
+output_dir: "simulation_rl"  # Directory to save trajectory data
