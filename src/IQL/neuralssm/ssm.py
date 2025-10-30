@@ -94,7 +94,6 @@ def compute_margin(
 
     # Compute margins: we want expert actions to have LOW mismatch
     # and other actions to have HIGH mismatch
-    # margin = mean_other_mismatches - expert_mismatches
     # Positive margin = good (expert more aligned than others)
     margins = mean_other_mismatches - expert_mismatches
 
@@ -187,12 +186,6 @@ class MambaSSM(nn.Module):
         # Output projection
         self.out_proj = nn.Linear(self.hidden_dim, self.n_objectives)
 
-        # Skip connection projection (if obs_dim != n_objectives)
-        if self.obs_dim != self.n_objectives:
-            self.skip_proj = nn.Linear(self.obs_dim, self.n_objectives, bias=False)
-        else:
-            self.skip_proj = None
-
         # Move to device
         self.to(self.device)
 
@@ -214,7 +207,6 @@ class MambaSSM(nn.Module):
                    alpha > 1 for each dimension (via softplus + 1)
         """
         T = x.shape[0]
-        skip_input = x  # Save for skip connection
 
         # Process through each Mamba layer
         for layer_idx in range(self.num_layers):
@@ -244,14 +236,6 @@ class MambaSSM(nn.Module):
 
         # Final output projection
         output = self.out_proj(x)  # [T, n_objectives]
-
-        # Skip connection from input to output
-        if self.skip_proj is not None:
-            output = output + self.skip_proj(skip_input)
-        else:
-            # Only add skip if dimensions match
-            if skip_input.shape[-1] == output.shape[-1]:
-                output = output + skip_input
 
         # Convert to Dirichlet concentration parameters (alpha > 0)
         # Use softplus + 1 to ensure alpha >= 1 (concentrated distribution)
@@ -397,12 +381,6 @@ class GRUSSM(nn.Module):
         # Output projection
         self.out_proj = nn.Linear(self.hidden_dim, self.n_objectives)
 
-        # Skip connection projection (if obs_dim != n_objectives)
-        if self.obs_dim != self.n_objectives:
-            self.skip_proj = nn.Linear(self.obs_dim, self.n_objectives, bias=False)
-        else:
-            self.skip_proj = None
-
         # Move to device
         self.to(self.device)
 
@@ -423,8 +401,6 @@ class GRUSSM(nn.Module):
             alpha: Dirichlet concentration parameters [T, n_objectives]
                    alpha > 1 for each dimension (via softplus + 1)
         """
-        skip_input = x  # Save for skip connection
-
         # Add batch dimension for GRU: [T, obs_dim] -> [T, 1, obs_dim]
         x_batched = x.unsqueeze(1)
 
@@ -436,14 +412,6 @@ class GRUSSM(nn.Module):
 
         # Output projection
         output = self.out_proj(gru_out)  # [T, n_objectives]
-
-        # Skip connection from input to output
-        if self.skip_proj is not None:
-            output = output + self.skip_proj(skip_input)
-        else:
-            # Only add skip if dimensions match
-            if skip_input.shape[-1] == output.shape[-1]:
-                output = output + skip_input
 
         # Convert to Dirichlet concentration parameters (alpha > 0)
         # Use softplus + 1 to ensure alpha >= 1 (concentrated distribution)
