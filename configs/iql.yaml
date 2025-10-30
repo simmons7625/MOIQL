@@ -12,7 +12,7 @@ hidden_dim: 256
 # IQL-specific hyperparameters
 lr: 1.0e-5  # Learning rate
 gamma: 0.99  # Discount factor
-mismatch_coef: 50.0  # Coefficient for mismatch regularization term (0 = disabled, SSM handles preference learning)
+mismatch_coef: 100.0  # Coefficient for mismatch regularization term (0 = disabled, SSM handles preference learning)
 tau: 0.005  # Expectile parameter for value function update
 
 # Training settings
@@ -37,8 +37,8 @@ ekf:
 
 # Mamba SSM settings (use if ssm_type == "mamba")
 mamba:
-  hidden_dim: 128
-  learning_rate: 1.0e-4
+  hidden_dim: 256
+  learning_rate: 1.0e-5
 
 # Device
 device: "cuda"

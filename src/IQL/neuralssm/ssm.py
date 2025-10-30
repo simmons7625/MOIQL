@@ -200,7 +200,7 @@ class MambaSSM(nn.Module):
 
         return output
 
-    def predict_sequence(self, observations: np.ndarray) -> np.ndarray:
+    def predict(self, observations: np.ndarray) -> np.ndarray:
         """
         Predict preferences for entire trajectory sequence.
 
@@ -218,7 +218,16 @@ class MambaSSM(nn.Module):
 
         return preferences.cpu().numpy()
 
-    def train_trajectory(
+    def reset_params(self):
+        """Reset model parameters."""
+
+        def reset_layer(layer):
+            if hasattr(layer, "reset_parameters"):
+                layer.reset_parameters()
+
+        self.apply(reset_layer)
+
+    def train(
         self,
         observations: np.ndarray,
         actions: np.ndarray,
@@ -251,10 +260,8 @@ class MambaSSM(nn.Module):
         # Loss is negative margin (we want to maximize margin)
         loss = -margins.mean()
 
-        return loss
-
-    def step(self, loss: torch.Tensor):
-        """Perform backward pass and optimizer step."""
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
+
+        return loss
