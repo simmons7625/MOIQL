@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Dict
 
 from ..actor_critic import ActorCritic
-from .ssm import MambaSSM, compute_mismatch
+from .ssm import MambaSSM, GRUSSM, compute_mismatch
 
 
 class NeuralSSMIQTrainer:
@@ -317,8 +317,8 @@ class NeuralSSMIQTrainer:
 
         torch.save(checkpoint, save_path)
 
-        # Save SSM separately
-        if isinstance(self.ssm, MambaSSM):
+        # Save SSM separately (for both MambaSSM and GRUSSM)
+        if isinstance(self.ssm, (MambaSSM, GRUSSM)):
             ssm_path = save_path.parent / f"{save_path.stem}_ssm.pt"
             torch.save(
                 {
@@ -339,8 +339,8 @@ class NeuralSSMIQTrainer:
         self.q_optimizer.load_state_dict(checkpoint["q_optimizer"])
         self.current_preference = checkpoint["current_preference"]
 
-        # Load SSM if file exists
-        if isinstance(self.ssm, MambaSSM):
+        # Load SSM if file exists (for both MambaSSM and GRUSSM)
+        if isinstance(self.ssm, (MambaSSM, GRUSSM)):
             ssm_path = save_path.parent / f"{save_path.stem}_ssm.pt"
             if ssm_path.exists():
                 ssm_checkpoint = torch.load(

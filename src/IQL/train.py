@@ -290,7 +290,8 @@ def train(config: Dict[str, Any]):
 
     # Create trainer based on SSM type
     ssm_type = config.get("ssm_type", "pf")
-    if ssm_type == "mamba":
+    # Neural SSMs (mamba, gru) use NeuralSSMIQTrainer
+    if ssm_type in ["mamba", "gru"]:
         trainer = NeuralSSMIQTrainer(
             obs_dim=obs_dim,
             action_dim=action_dim,
@@ -305,6 +306,7 @@ def train(config: Dict[str, Any]):
             device=config["device"],
         )
     else:
+        # Simple SSMs (pf, ekf) use SSMIQTrainer
         trainer = SSMIQTrainer(
             obs_dim=obs_dim,
             action_dim=action_dim,
