@@ -19,7 +19,7 @@ tau: 0.005  # Expectile parameter for value function update
 n_updates: 10000  # Total number of training updates (one trajectory per update)
 
 # State Space Model (SSM) for preference prediction
-ssm_type: "mamba"  # Options: "pf" (particle filter), "ekf" (extended kalman filter), "mamba", "gru"
+ssm_type: "gru"  # Options: "pf" (particle filter), "ekf" (extended kalman filter), "mamba", "gru"
 
 # Particle Filter settings (used if ssm_type == "pf")
 particle_filter:

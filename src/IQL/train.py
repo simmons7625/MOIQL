@@ -146,11 +146,12 @@ def create_ssm(
         "neural": "neural_ssm",
         "neural_ssm": "neural_ssm",
         "mamba": "mamba",
+        "gru": "gru",
     }
 
     if ssm_type not in type_mapping:
         raise ValueError(
-            f"Unsupported SSM type: {ssm_type}. Options: pf, ekf, neural, mamba"
+            f"Unsupported SSM type: {ssm_type}. Options: pf, ekf, neural, mamba, gru"
         )
 
     full_type = type_mapping[ssm_type]
