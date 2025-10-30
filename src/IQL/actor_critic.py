@@ -24,6 +24,21 @@ class ActorCritic(nn.Module):
         self.action_dim = action_dim
         self.n_objects = n_objects
 
+        # Initialize parameters with Xavier initialization
+        self.reset_params()
+
+    def reset_params(self):
+        """Initialize model parameters with Xavier/Kaiming initialization."""
+
+        def init_weights(m):
+            if isinstance(m, nn.Linear):
+                # Xavier uniform initialization for linear layers
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+        self.apply(init_weights)
+
     def forward(self, x):
         features = self.shared(x)
         return features

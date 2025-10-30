@@ -1,0 +1,28 @@
+device: cuda
+early_stopping_patience: 10
+ekf:
+  initial_variance: 0.1
+  observation_noise: 0.1
+  process_noise: 0.01
+eval_interval: 100
+expert_dir: simulation_results/20251026_201017/
+gamma: 0.99
+hidden_dim: 256
+lr: 1.0e-05
+mismatch_coef: 30.0
+n_trajectories: 100
+n_updates: 10000
+neural_ssm:
+  hidden_dim: 64
+  learning_rate: 0.001
+  n_layers: 2
+particle_filter:
+  initial_noise: 1.0
+  n_particles: 1000
+  observation_noise: 0.05
+  process_noise: 0.05
+save_dir: moiql_results
+ssm_type: pf
+tau: 0.005
+use_wandb: false
+wandb_project: MOIQL

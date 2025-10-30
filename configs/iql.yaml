@@ -38,7 +38,7 @@ ekf:
 # Mamba SSM settings (use if ssm_type == "mamba")
 mamba:
   hidden_dim: 256
-  learning_rate: 1.0e-5
+  learning_rate: 1.0e-4
 
 # Device
 device: "cuda"
