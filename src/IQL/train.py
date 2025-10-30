@@ -20,13 +20,13 @@ import wandb
 import yaml
 from tqdm import tqdm
 
-# for non neural SSMs
-from src.IQL.simplessm.trainer import SSMIQTrainer
-from src.IQL.simplessm.ssm import ParticleFilter, ExtendedKalmanFilter, StateSpaceModel
-
-# for neural SSMs
-from src.IQL.neuralssm.trainer import NeuralSSMIQTrainer
-from src.IQL.neuralssm.ssm import MambaSSM, GRUSSM
+from src.IQL.trainer import SSMIQTrainer
+from src.IQL.ssm import (
+    ParticleFilter,
+    ExtendedKalmanFilter,
+    KalmanFilter,
+    StateSpaceModel,
+)
 
 # Common evaluation function
 
@@ -141,18 +141,14 @@ def create_ssm(
     type_mapping = {
         "pf": "particle_filter",
         "particle_filter": "particle_filter",
+        "kf": "kalman_filter",
+        "kalman_filter": "kalman_filter",
         "ekf": "extended_kalman_filter",
         "extended_kalman_filter": "extended_kalman_filter",
-        "neural": "neural_ssm",
-        "neural_ssm": "neural_ssm",
-        "mamba": "mamba",
-        "gru": "gru",
     }
 
     if ssm_type not in type_mapping:
-        raise ValueError(
-            f"Unsupported SSM type: {ssm_type}. Options: pf, ekf, neural, mamba, gru"
-        )
+        raise ValueError(f"Unsupported SSM type: {ssm_type}. Options: pf, kf, ekf")
 
     full_type = type_mapping[ssm_type]
 
@@ -164,6 +160,14 @@ def create_ssm(
             process_noise=pf_config.get("process_noise", 0.01),
             observation_noise=pf_config.get("observation_noise", 0.1),
         )
+    elif full_type == "kalman_filter":
+        kf_config = config.get("kf", {})
+        ssm = KalmanFilter(
+            n_objectives=n_objectives,
+            process_noise=kf_config.get("process_noise", 0.01),
+            observation_noise=kf_config.get("observation_noise", 0.1),
+            initial_variance=kf_config.get("initial_variance", 0.1),
+        )
     elif full_type == "extended_kalman_filter":
         ekf_config = config.get("ekf", {})
         ssm = ExtendedKalmanFilter(
@@ -172,28 +176,6 @@ def create_ssm(
             observation_noise=ekf_config.get("observation_noise", 0.1),
             initial_variance=ekf_config.get("initial_variance", 0.1),
             beta=ekf_config.get("beta", 5.0),
-        )
-    elif full_type == "mamba":
-        mamba_config = config.get("mamba", {})
-        ssm = MambaSSM(
-            obs_dim=obs_dim,
-            action_dim=action_dim,
-            n_objectives=n_objectives,
-            hidden_dim=mamba_config.get("hidden_dim", 256),
-            num_layers=mamba_config.get("num_layers", 1),
-            learning_rate=mamba_config.get("learning_rate", 0.001),
-            device=config.get("device", "cuda"),
-        )
-    elif full_type == "gru":
-        gru_config = config.get("gru", {})
-        ssm = GRUSSM(
-            obs_dim=obs_dim,
-            action_dim=action_dim,
-            n_objectives=n_objectives,
-            hidden_dim=gru_config.get("hidden_dim", 256),
-            num_layers=gru_config.get("num_layers", 1),
-            learning_rate=gru_config.get("learning_rate", 0.001),
-            device=config.get("device", "cuda"),
         )
     else:
         raise ValueError(f"SSM type '{full_type}' not yet implemented")
@@ -291,38 +273,20 @@ def train(config: Dict[str, Any]):
     # Extract IQL config (support both new nested format and old flat format for backward compatibility)
     iql_config = config.get("iql", config)
 
-    # Create trainer based on SSM type
-    ssm_type = config.get("ssm_type", "pf")
-    # Neural SSMs (mamba, gru) use NeuralSSMIQTrainer
-    if ssm_type in ["mamba", "gru"]:
-        trainer = NeuralSSMIQTrainer(
-            obs_dim=obs_dim,
-            action_dim=action_dim,
-            n_objectives=n_objectives,
-            ssm_model=ssm,
-            hidden_dim=iql_config.get("hidden_dim", 256),
-            lr=iql_config.get("lr", 1e-4),
-            gamma=iql_config.get("gamma", 0.99),
-            tau=iql_config.get("tau", 0.005),
-            mismatch_coef=iql_config.get("mismatch_coef", 1.0),
-            max_timesteps=config.get("max_timesteps"),
-            device=config.get("device", "cuda"),
-        )
-    else:
-        # Simple SSMs (pf, ekf) use SSMIQTrainer
-        trainer = SSMIQTrainer(
-            obs_dim=obs_dim,
-            action_dim=action_dim,
-            n_objectives=n_objectives,
-            ssm_model=ssm,
-            hidden_dim=iql_config.get("hidden_dim", 256),
-            lr=iql_config.get("lr", 1e-4),
-            gamma=iql_config.get("gamma", 0.99),
-            tau=iql_config.get("tau", 0.005),
-            mismatch_coef=iql_config.get("mismatch_coef", 1.0),
-            max_timesteps=config.get("max_timesteps"),
-            device=config.get("device", "cuda"),
-        )
+    # Create trainer
+    trainer = SSMIQTrainer(
+        obs_dim=obs_dim,
+        action_dim=action_dim,
+        n_objectives=n_objectives,
+        ssm_model=ssm,
+        hidden_dim=iql_config.get("hidden_dim", 256),
+        lr=iql_config.get("lr", 1e-4),
+        gamma=iql_config.get("gamma", 0.99),
+        tau=iql_config.get("tau", 0.005),
+        mismatch_coef=iql_config.get("mismatch_coef", 1.0),
+        max_timesteps=config.get("max_timesteps"),
+        device=config.get("device", "cuda"),
+    )
 
     print(f"Device: {trainer.device}")
     print(f"Model parameters: {sum(p.numel() for p in trainer.q_network.parameters())}")

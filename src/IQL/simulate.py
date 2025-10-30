@@ -40,74 +40,53 @@ def load_iql_model(
     # Import based on SSM type
     ssm_type = training_config.get("ssm_type", "pf")
 
-    if ssm_type == "mamba":
-        from src.IQL.neuralssm.trainer import NeuralSSMIQTrainer
-        from src.IQL.neuralssm.ssm import MambaSSM
+    from src.IQL.trainer import SSMIQTrainer
+    from src.IQL.ssm import ParticleFilter, ExtendedKalmanFilter, KalmanFilter
 
-        # Create SSM
-        ssm = MambaSSM(
-            obs_dim=training_config["obs_dim"],
-            action_dim=training_config["action_dim"],
+    # Create SSM based on type
+    if ssm_type == "pf":
+        pf_config = training_config.get("particle_filter", {})
+        ssm = ParticleFilter(
             n_objectives=training_config["n_objectives"],
-            hidden_dim=training_config.get("mamba", {}).get("hidden_dim", 128),
-            learning_rate=training_config.get("mamba", {}).get("learning_rate", 1e-3),
-            device=device,
+            n_particles=pf_config.get("n_particles", 1000),
+            process_noise=pf_config.get("process_noise", 0.01),
+            observation_noise=pf_config.get("observation_noise", 0.1),
+            initial_noise=pf_config.get("initial_noise", 1.0),
         )
-
-        # Create trainer
-        trainer = NeuralSSMIQTrainer(
-            obs_dim=training_config["obs_dim"],
-            action_dim=training_config["action_dim"],
+    elif ssm_type == "kf":
+        kf_config = training_config.get("kf", {})
+        ssm = KalmanFilter(
             n_objectives=training_config["n_objectives"],
-            ssm_model=ssm,
-            hidden_dim=training_config.get("hidden_dim", 256),
-            lr=training_config.get("lr", 3e-4),
-            gamma=training_config.get("gamma", 0.99),
-            tau=training_config.get("tau", 0.005),
-            mismatch_coef=training_config.get("mismatch_coef", 1.0),
-            max_timesteps=training_config.get("max_timesteps"),
-            device=device,
+            process_noise=kf_config.get("process_noise", 0.01),
+            observation_noise=kf_config.get("observation_noise", 0.1),
+            initial_variance=kf_config.get("initial_variance", 0.1),
+        )
+    elif ssm_type == "ekf":
+        ekf_config = training_config.get("ekf", {})
+        ssm = ExtendedKalmanFilter(
+            n_objectives=training_config["n_objectives"],
+            process_noise=ekf_config.get("process_noise", 0.01),
+            observation_noise=ekf_config.get("observation_noise", 0.1),
+            initial_noise=ekf_config.get("initial_noise", 0.1),
+            beta=ekf_config.get("beta", 1.0),
         )
     else:
-        from src.IQL.simplessm.trainer import SSMIQTrainer
-        from src.IQL.simplessm.ssm import ParticleFilter, ExtendedKalmanFilter
+        raise ValueError(f"Unknown SSM type: {ssm_type}")
 
-        # Create SSM based on type
-        if ssm_type == "pf":
-            pf_config = training_config.get("particle_filter", {})
-            ssm = ParticleFilter(
-                n_objectives=training_config["n_objectives"],
-                n_particles=pf_config.get("n_particles", 1000),
-                process_noise=pf_config.get("process_noise", 0.01),
-                observation_noise=pf_config.get("observation_noise", 0.1),
-                initial_noise=pf_config.get("initial_noise", 1.0),
-            )
-        elif ssm_type == "ekf":
-            ekf_config = training_config.get("ekf", {})
-            ssm = ExtendedKalmanFilter(
-                n_objectives=training_config["n_objectives"],
-                process_noise=ekf_config.get("process_noise", 0.01),
-                observation_noise=ekf_config.get("observation_noise", 0.1),
-                initial_noise=ekf_config.get("initial_noise", 0.1),
-                beta=ekf_config.get("beta", 1.0),
-            )
-        else:
-            raise ValueError(f"Unknown SSM type: {ssm_type}")
-
-        # Create trainer
-        trainer = SSMIQTrainer(
-            obs_dim=training_config["obs_dim"],
-            action_dim=training_config["action_dim"],
-            n_objectives=training_config["n_objectives"],
-            ssm_model=ssm,
-            hidden_dim=training_config.get("hidden_dim", 256),
-            lr=training_config.get("lr", 3e-4),
-            gamma=training_config.get("gamma", 0.99),
-            tau=training_config.get("tau", 0.005),
-            mismatch_coef=training_config.get("mismatch_coef", 1.0),
-            max_timesteps=training_config.get("max_timesteps"),
-            device=device,
-        )
+    # Create trainer
+    trainer = SSMIQTrainer(
+        obs_dim=training_config["obs_dim"],
+        action_dim=training_config["action_dim"],
+        n_objectives=training_config["n_objectives"],
+        ssm_model=ssm,
+        hidden_dim=training_config.get("hidden_dim", 256),
+        lr=training_config.get("lr", 3e-4),
+        gamma=training_config.get("gamma", 0.99),
+        tau=training_config.get("tau", 0.005),
+        mismatch_coef=training_config.get("mismatch_coef", 1.0),
+        max_timesteps=training_config.get("max_timesteps"),
+        device=device,
+    )
 
     # Load checkpoint
     trainer.load(str(model_path))
@@ -225,7 +204,7 @@ def collect_trajectory(
 
         # Get predicted preference from SSM
         if hasattr(trainer.ssm, "predict_sequence"):
-            # Sequence-wise SSM (MambaSSM) - predict on full sequence so far
+            # Sequence-wise SSM - predict on full sequence so far
             obs_array = np.array(observations_list)
             predicted_prefs = trainer.ssm.predict_sequence(obs_array)
             predicted_pref = predicted_prefs[-1]  # Get last prediction

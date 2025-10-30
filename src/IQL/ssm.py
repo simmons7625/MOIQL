@@ -138,6 +138,69 @@ def compute_margin_objective(
     return margins[expert_action]
 
 
+def compute_margin(
+    preference_weights: torch.Tensor,
+    q_values_all: torch.Tensor,
+    actions: torch.Tensor,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """
+    Compute margin for expert actions (PyTorch version for gradient computation).
+
+    Margin = mean_other_mismatch - expert_mismatch
+    Higher margin means expert action is more aligned with preference than others.
+
+    Args:
+        preference_weights: Preference weights [batch, n_objectives]
+        q_values_all: Q-values for all actions [batch, action_dim, n_objectives]
+        actions: Expert actions [batch]
+        eps: Small constant to avoid division by zero
+
+    Returns:
+        Margins [batch] (higher is better)
+    """
+    batch_size, action_dim, n_objectives = q_values_all.shape
+
+    # Normalize preference weights
+    pref_norm = torch.norm(preference_weights, dim=-1, keepdim=True) + eps
+    pref_normalized = preference_weights / pref_norm  # [batch, n_objectives]
+
+    # Compute mismatch for all actions
+    # q_values_all: [batch, action_dim, n_objectives]
+    q_norm = (
+        torch.norm(q_values_all, dim=-1, keepdim=True) + eps
+    )  # [batch, action_dim, 1]
+    q_normalized = q_values_all / q_norm  # [batch, action_dim, n_objectives]
+
+    # Expand preferences for broadcasting
+    pref_expanded = pref_normalized.unsqueeze(1)  # [batch, 1, n_objectives]
+
+    # Compute mismatch for all actions: ||pref_norm - q_norm||^2
+    mismatches = torch.sum(
+        (pref_expanded - q_normalized) ** 2, dim=-1
+    )  # [batch, action_dim]
+
+    # Get expert mismatch
+    actions_idx = actions.long().unsqueeze(-1)  # [batch, 1]
+    expert_mismatch = torch.gather(mismatches, 1, actions_idx).squeeze(-1)  # [batch]
+
+    # Compute mean of other mismatches (excluding expert action)
+    # Create mask for other actions
+    batch_indices = torch.arange(batch_size, device=q_values_all.device)
+    mask = torch.ones_like(mismatches, dtype=torch.bool)  # [batch, action_dim]
+    mask[batch_indices, actions.long()] = False
+
+    # Sum other mismatches and divide by (action_dim - 1)
+    other_mismatches_sum = torch.sum(mismatches * mask.float(), dim=1)  # [batch]
+    mean_other_mismatch = other_mismatches_sum / (action_dim - 1)  # [batch]
+
+    # Margin = mean_other_mismatch - expert_mismatch
+    # Positive margin means expert action has lower mismatch (better alignment)
+    margins = mean_other_mismatch - expert_mismatch  # [batch]
+
+    return margins
+
+
 def softmax_stable(x: np.ndarray, axis: int = -1) -> np.ndarray:
     """Numerically stable softmax."""
     xm = x - np.max(x, axis=axis, keepdims=True)
@@ -518,4 +581,192 @@ class ExtendedKalmanFilter(StateSpaceModel):
     def reset(self):
         """Reset EKF to initial state."""
         self.x = np.zeros(self.n_objectives)
+        self.P = np.eye(self.n_objectives) * 0.1
+
+
+class KalmanFilter(StateSpaceModel):
+    """
+    Standard Kalman Filter for preference weight prediction using linear observation model.
+
+    Uses a simpler linear observation model compared to EKF:
+    - State representation: preference weights directly (constrained to simplex via projection)
+    - Process model: w_t = w_{t-1} + process_noise (random walk with projection)
+    - Observation model: Linear relationship between preference weights and observed margin
+
+    This is simpler and faster than EKF but assumes linearity in the observation.
+    """
+
+    def __init__(
+        self,
+        n_objectives: int,
+        process_noise: float = 0.01,
+        observation_noise: float = 0.1,
+        initial_variance: float = 0.1,
+        seed: int = 42,
+    ):
+        """
+        Initialize Kalman Filter.
+
+        Args:
+            n_objectives: Number of objectives
+            process_noise: Process noise std on preference weights
+            observation_noise: Observation noise std
+            initial_variance: Initial covariance diagonal value
+            seed: Random seed
+        """
+        self.n_objectives = n_objectives
+        self.process_noise = process_noise
+        self.observation_noise = observation_noise
+        self.rng = np.random.RandomState(seed)
+
+        # State: preference weights w [n_objectives]
+        # Initialize to uniform distribution
+        self.w = np.ones(n_objectives) / n_objectives
+
+        # Covariance matrix [n_objectives, n_objectives]
+        self.P = np.eye(n_objectives) * initial_variance
+
+        # Process noise covariance (random walk on weights)
+        self.Q = np.eye(n_objectives) * (process_noise**2)
+
+        # Observation noise (scalar for mismatch)
+        self.R = observation_noise**2
+
+        self._eps = 1e-8
+
+    def _project_to_simplex(self, w: np.ndarray) -> np.ndarray:
+        """
+        Project weights onto probability simplex using euclidean projection.
+
+        Ensures: w >= 0 and sum(w) = 1
+
+        Args:
+            w: Weights to project [n_objectives]
+
+        Returns:
+            Projected weights [n_objectives]
+        """
+        # Sort weights in descending order
+        w_sorted = np.sort(w)[::-1]
+        cumsum_w = np.cumsum(w_sorted)
+
+        # Find rho (largest j such that w_j + (1 - cumsum) / (j+1) > 0)
+        rho = None
+        for j in range(self.n_objectives):
+            if w_sorted[j] + (1.0 - cumsum_w[j]) / (j + 1) > 0:
+                rho = j
+
+        if rho is None:
+            # Fallback to uniform
+            return np.ones(self.n_objectives) / self.n_objectives
+
+        # Compute threshold
+        theta = (1.0 - cumsum_w[rho]) / (rho + 1)
+
+        # Project
+        w_proj = np.maximum(w + theta, 0)
+
+        # Normalize to ensure sum = 1 (numerical stability)
+        w_sum = np.sum(w_proj)
+        if w_sum > self._eps:
+            w_proj = w_proj / w_sum
+        else:
+            w_proj = np.ones(self.n_objectives) / self.n_objectives
+
+        return w_proj
+
+    def predict(self, observation: np.ndarray, hidden_state: np.ndarray) -> np.ndarray:
+        """
+        Predict preference weights (return current estimate).
+
+        Args:
+            observation: Current observation (not used in prediction)
+            hidden_state: Current hidden state (not used in prediction)
+
+        Returns:
+            Predicted preference weights
+        """
+        return self.w.copy()
+
+    def update(
+        self,
+        observation: np.ndarray,
+        action: np.ndarray,
+        q_values_all: np.ndarray,
+    ):
+        """
+        Update preference weights using Kalman Filter with linear observation model.
+
+        Observation: margin of expert action compared to others.
+
+        Args:
+            observation: Current observation (not used)
+            action: Expert action (scalar)
+            q_values_all: Q-values for all actions [action_dim, n_objectives]
+        """
+        expert_action = int(action)
+
+        # ===== Prediction Step =====
+        # State prediction: w_pred = w (no dynamics, random walk)
+        w_pred = self.w.copy()
+
+        # Covariance prediction: P_pred = P + Q
+        P_pred = self.P + self.Q
+
+        # ===== Update Step =====
+        # Compute expected observation using linear model
+        # H = q_expert - mean(q_other) [n_objectives]
+        # This is the gradient of margin w.r.t. preferences
+        q_expert = q_values_all[expert_action]  # [n_objectives]
+
+        # Mean of other Q-values
+        other_mask = np.ones(q_values_all.shape[0], dtype=bool)
+        other_mask[expert_action] = False
+        q_others = q_values_all[other_mask]  # [action_dim-1, n_objectives]
+        q_mean_other = np.mean(q_others, axis=0)  # [n_objectives]
+
+        # Observation matrix (linear relationship)
+        H = (q_expert - q_mean_other).reshape(1, -1)  # [1, n_objectives]
+
+        # Predicted observation: h_pred = H @ w_pred
+        h_pred = H @ w_pred  # scalar
+
+        # Actual observation: We want expert action to have positive margin
+        # Set target observation = 1 (positive margin)
+        z = 1.0
+
+        # Innovation (measurement residual)
+        y = z - h_pred  # scalar
+
+        # Innovation covariance: S = H @ P_pred @ H^T + R
+        S = (H @ P_pred @ H.T).item() + self.R  # scalar
+        S = max(S, self._eps)  # Ensure positive
+
+        # Kalman gain: K = P_pred @ H^T @ S^{-1}
+        K = (P_pred @ H.T) / S  # [n_objectives, 1]
+        K = K.flatten()  # [n_objectives]
+
+        # State update: w = w_pred + K @ y
+        w_updated = w_pred + K * y
+
+        # Project onto simplex to maintain constraint
+        self.w = self._project_to_simplex(w_updated)
+
+        # Covariance update: P = (I - K @ H) @ P_pred
+        identity = np.eye(self.n_objectives)
+        self.P = (identity - np.outer(K, H.flatten())) @ P_pred
+
+        # Ensure symmetry and positive definiteness
+        self.P = (self.P + self.P.T) / 2
+        self.P += np.eye(self.n_objectives) * self._eps
+
+        return None
+
+    def train_step(self, mean_loss):
+        """No learning step for standard KF (fully Bayesian update)."""
+        pass
+
+    def reset(self):
+        """Reset KF to initial state."""
+        self.w = np.ones(self.n_objectives) / self.n_objectives
         self.P = np.eye(self.n_objectives) * 0.1

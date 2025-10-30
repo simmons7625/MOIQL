@@ -10,16 +10,16 @@ hidden_dim: 256
 
 # PPO hyperparameters
 lr: 1.0e-4
-gamma: 0.99
+gamma: 0.995
 gae_lambda: 0.95
-clip_epsilon: 0.1
+clip_epsilon: 0.2
 vf_coef: 0.5
 ent_coef: 0.01
 max_grad_norm: 0.5
 
 # Training settings
 n_updates: 1000
-n_rollouts_per_update: 10
+n_rollouts_per_update: 30
 n_epochs: 5  # Epochs per update
 batch_size: 256
 

@@ -1,6 +1,0 @@
-{
-  "best_cross_entropy": 1.1151200738661582,
-  "best_preference_mae": 0.10948969796177835,
-  "best_update": 800,
-  "total_updates": 10000
-}
