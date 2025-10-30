@@ -375,6 +375,9 @@ class SSMIQTrainer:
         """
         import json
 
+        # Set Q-network to eval mode
+        self.q_network.eval()
+
         # Load trajectories
         expert_path = Path(expert_dir)
         traj_path = expert_path / "trajectories.json"
@@ -520,5 +523,8 @@ class SSMIQTrainer:
                 json.dump(eval_data, f, indent=2)
 
             print(f"Saved detailed predictions to {json_path}")
+
+        # Set Q-network back to train mode
+        self.q_network.train()
 
         return results

@@ -376,6 +376,10 @@ class NeuralSSMIQTrainer:
         """
         import json
 
+        # Set models to eval mode
+        self.q_network.eval()
+        self.ssm.eval()
+
         # Load trajectories
         expert_path = Path(expert_dir)
         traj_path = expert_path / "trajectories.json"
@@ -503,5 +507,9 @@ class NeuralSSMIQTrainer:
                 json.dump(eval_data, f, indent=2)
 
             print(f"Saved detailed predictions to {json_path}")
+
+        # Set models back to train mode
+        self.q_network.train()
+        self.ssm.train()
 
         return results
