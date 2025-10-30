@@ -231,8 +231,8 @@ class NeuralSSMIQTrainer:
             )  # [T, action_dim, n_objectives]
             q_values_all_np = q_values_all_traj.cpu().numpy()
 
-        # Train SSM on full trajectory sequence
-        ssm_loss = self.ssm.train(
+        # Update SSM on full trajectory sequence
+        ssm_loss = self.ssm.update(
             observations=traj_states, actions=traj_actions, q_values_all=q_values_all_np
         )
 
@@ -378,7 +378,7 @@ class NeuralSSMIQTrainer:
 
         # Set models to eval mode
         self.q_network.eval()
-        self.ssm.eval()
+        self.ssm.eval()  # Use PyTorch's train/eval mode
 
         # Load trajectories
         expert_path = Path(expert_dir)

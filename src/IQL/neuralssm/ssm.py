@@ -275,14 +275,14 @@ class MambaSSM(nn.Module):
         for A_log_param in self.A_log:
             nn.init.normal_(A_log_param, mean=0.0, std=1.0)
 
-    def train(
+    def update(
         self,
         observations: np.ndarray,
         actions: np.ndarray,
         q_values_all: np.ndarray,
     ) -> torch.Tensor:
         """
-        Train on full trajectory sequence.
+        Update model on full trajectory sequence.
 
         Args:
             observations: [T, obs_dim]
@@ -456,14 +456,14 @@ class GRUSSM(nn.Module):
             elif "bias" in name:
                 nn.init.zeros_(param)
 
-    def train(
+    def update(
         self,
         observations: np.ndarray,
         actions: np.ndarray,
         q_values_all: np.ndarray,
     ) -> torch.Tensor:
         """
-        Train on full trajectory sequence.
+        Update model on full trajectory sequence.
 
         Args:
             observations: [T, obs_dim]
