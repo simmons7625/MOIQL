@@ -149,28 +149,35 @@ class MambaSSM(nn.Module):
         self.num_layers = num_layers
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
 
+        # Action embedding for discrete actions
+        self.action_embed_dim = min(action_dim, 8)  # Embedding dimension
+        self.action_embedding = nn.Embedding(action_dim, self.action_embed_dim)
+
+        # Input dimension is obs + action_embedding
+        self.input_dim = obs_dim + self.action_embed_dim
+
         # Build multiple Mamba layers
         self.layers = nn.ModuleList()
         for i in range(num_layers):
             layer_dict = nn.ModuleDict(
                 {
                     "input_proj": nn.Linear(
-                        self.hidden_dim if i > 0 else self.obs_dim,
+                        self.hidden_dim if i > 0 else self.input_dim,
                         self.hidden_dim,
                         bias=False,
                     ),
                     "B_proj": nn.Linear(
-                        self.hidden_dim if i > 0 else self.obs_dim,
+                        self.hidden_dim if i > 0 else self.input_dim,
                         self.hidden_dim,
                         bias=False,
                     ),
                     "C_proj": nn.Linear(
-                        self.hidden_dim if i > 0 else self.obs_dim,
+                        self.hidden_dim if i > 0 else self.input_dim,
                         self.hidden_dim,
                         bias=False,
                     ),
                     "delta_proj": nn.Linear(
-                        self.hidden_dim if i > 0 else self.obs_dim,
+                        self.hidden_dim if i > 0 else self.input_dim,
                         self.hidden_dim,
                         bias=False,
                     ),
@@ -195,18 +202,25 @@ class MambaSSM(nn.Module):
         # Optimizer
         self.optimizer = torch.optim.Adam(self.parameters(), lr=learning_rate)
 
-    def forward(self, x):
+    def forward(self, observations, actions):
         """
         Forward pass through Mamba SSM for entire sequence.
 
         Args:
-            x: Input sequence [T, obs_dim] or [T, hidden_dim]
+            observations: [T, obs_dim] - observation sequence
+            actions: [T] - discrete action sequence (indices)
 
         Returns:
             alpha: Dirichlet concentration parameters [T, n_objectives]
                    alpha > 1 for each dimension (via softplus + 1)
         """
-        T = x.shape[0]
+        T = observations.shape[0]
+
+        # Embed actions: [T] -> [T, action_embed_dim]
+        action_embeds = self.action_embedding(actions)
+
+        # Concatenate observations and action embeddings: [T, obs_dim + action_embed_dim]
+        x = torch.cat([observations, action_embeds], dim=-1)
 
         # Process through each Mamba layer
         for layer_idx in range(self.num_layers):
@@ -243,7 +257,7 @@ class MambaSSM(nn.Module):
 
         return alpha
 
-    def predict(self, observations: np.ndarray) -> np.ndarray:
+    def predict(self, observations: np.ndarray, actions: np.ndarray) -> np.ndarray:
         """
         Predict preferences for entire trajectory sequence.
 
@@ -251,14 +265,16 @@ class MambaSSM(nn.Module):
 
         Args:
             observations: [T, obs_dim] - full trajectory observations
+            actions: [T] - discrete action sequence
 
         Returns:
             preferences: [T, n_objectives] - mean predictions for all timesteps
         """
         obs_tensor = torch.FloatTensor(observations).to(self.device)  # [T, obs_dim]
+        actions_tensor = torch.LongTensor(actions).to(self.device)  # [T]
 
         with torch.no_grad():
-            alpha = self.forward(obs_tensor)  # [T, n_objectives]
+            alpha = self.forward(obs_tensor, actions_tensor)  # [T, n_objectives]
             # Mean of Dirichlet: alpha / sum(alpha)
             alpha_sum = alpha.sum(dim=-1, keepdim=True)
             preferences = alpha / alpha_sum  # [T, n_objectives]
@@ -305,7 +321,7 @@ class MambaSSM(nn.Module):
         )  # [T, action_dim, n_objectives]
 
         # Forward pass through entire sequence
-        alpha = self.forward(obs_tensor)  # [T, n_objectives]
+        alpha = self.forward(obs_tensor, actions_tensor)  # [T, n_objectives]
 
         # Mean of Dirichlet: alpha / sum(alpha)
         alpha_sum = alpha.sum(dim=-1, keepdim=True)
@@ -370,9 +386,16 @@ class GRUSSM(nn.Module):
         self.num_layers = num_layers
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
 
+        # Action embedding for discrete actions
+        self.action_embed_dim = min(action_dim, 8)  # Embedding dimension
+        self.action_embedding = nn.Embedding(action_dim, self.action_embed_dim)
+
+        # Input dimension is obs + action_embedding
+        self.input_dim = obs_dim + self.action_embed_dim
+
         # GRU layers
         self.gru = nn.GRU(
-            input_size=obs_dim,
+            input_size=self.input_dim,
             hidden_size=hidden_dim,
             num_layers=num_layers,
             batch_first=False,  # [T, batch, features]
@@ -390,18 +413,25 @@ class GRUSSM(nn.Module):
         # Optimizer
         self.optimizer = torch.optim.Adam(self.parameters(), lr=learning_rate)
 
-    def forward(self, x):
+    def forward(self, observations, actions):
         """
         Forward pass through GRU SSM for entire sequence.
 
         Args:
-            x: Input sequence [T, obs_dim]
+            observations: [T, obs_dim] - observation sequence
+            actions: [T] - discrete action sequence (indices)
 
         Returns:
             alpha: Dirichlet concentration parameters [T, n_objectives]
                    alpha > 1 for each dimension (via softplus + 1)
         """
-        # Add batch dimension for GRU: [T, obs_dim] -> [T, 1, obs_dim]
+        # Embed actions: [T] -> [T, action_embed_dim]
+        action_embeds = self.action_embedding(actions)
+
+        # Concatenate observations and action embeddings: [T, obs_dim + action_embed_dim]
+        x = torch.cat([observations, action_embeds], dim=-1)
+
+        # Add batch dimension for GRU: [T, input_dim] -> [T, 1, input_dim]
         x_batched = x.unsqueeze(1)
 
         # GRU forward pass
@@ -419,7 +449,7 @@ class GRUSSM(nn.Module):
 
         return alpha
 
-    def predict(self, observations: np.ndarray) -> np.ndarray:
+    def predict(self, observations: np.ndarray, actions: np.ndarray) -> np.ndarray:
         """
         Predict preferences for entire trajectory sequence.
 
@@ -427,14 +457,16 @@ class GRUSSM(nn.Module):
 
         Args:
             observations: [T, obs_dim] - full trajectory observations
+            actions: [T] - discrete action sequence
 
         Returns:
             preferences: [T, n_objectives] - mean predictions for all timesteps
         """
         obs_tensor = torch.FloatTensor(observations).to(self.device)  # [T, obs_dim]
+        actions_tensor = torch.LongTensor(actions).to(self.device)  # [T]
 
         with torch.no_grad():
-            alpha = self.forward(obs_tensor)  # [T, n_objectives]
+            alpha = self.forward(obs_tensor, actions_tensor)  # [T, n_objectives]
             # Mean of Dirichlet: alpha / sum(alpha)
             alpha_sum = alpha.sum(dim=-1, keepdim=True)
             preferences = alpha / alpha_sum  # [T, n_objectives]
@@ -486,7 +518,7 @@ class GRUSSM(nn.Module):
         )  # [T, action_dim, n_objectives]
 
         # Forward pass through entire sequence
-        alpha = self.forward(obs_tensor)  # [T, n_objectives]
+        alpha = self.forward(obs_tensor, actions_tensor)  # [T, n_objectives]
 
         # Mean of Dirichlet: alpha / sum(alpha)
         alpha_sum = alpha.sum(dim=-1, keepdim=True)

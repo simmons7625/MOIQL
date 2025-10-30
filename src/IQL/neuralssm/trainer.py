@@ -237,7 +237,9 @@ class NeuralSSMIQTrainer:
         )
 
         # Predict preferences for entire trajectory
-        predicted_preferences = self.ssm.predict(traj_states)  # [T, n_objectives]
+        predicted_preferences = self.ssm.predict(
+            traj_states, traj_actions
+        )  # [T, n_objectives]
 
         # Compute preference MAE
         preference_errors = np.abs(predicted_preferences[:, 0] - traj_prefs[:, 0])
@@ -405,7 +407,7 @@ class NeuralSSMIQTrainer:
             traj_prefs = np.array(traj["preference_weights"])
 
             # Sequence-wise prediction
-            predicted_prefs = self.ssm.predict(traj_states)
+            predicted_prefs = self.ssm.predict(traj_states, traj_actions)
 
             traj_predictions = []
             traj_cross_entropies = []
