@@ -157,6 +157,9 @@ class MambaSSM(nn.Module):
         # Move to device
         self.to(self.device)
 
+        # Initialize parameters with Xavier initialization
+        self.reset_params()
+
         # Optimizer
         self.optimizer = torch.optim.Adam(self.parameters(), lr=learning_rate)
 
