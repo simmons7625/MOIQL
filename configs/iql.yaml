@@ -6,17 +6,14 @@
 expert_dir: "simulation_rl/20251026_201017/"
 n_trajectories: 100  # Number of trajectories to use from expert dataset
 
-# Network architecture
-hidden_dim: 256
-
-# IQL-specific hyperparameters
-lr: 1.0e-5  # Learning rate
-gamma: 0.99  # Discount factor
-mismatch_coef: 50.0  # Coefficient for mismatch regularization term (0 = disabled, SSM handles preference learning)
-tau: 0.005  # Expectile parameter for value function update
-
-# Training settings
-n_updates: 10000  # Total number of training updates (one trajectory per update)
+# IQL training configuration
+iql:
+  hidden_dim: 256  # Network hidden dimension
+  lr: 1.0e-6  # Learning rate for Q-network
+  gamma: 0.99  # Discount factor
+  tau: 0.005  # Soft update coefficient for target network
+  mismatch_coef: 30.0  # Coefficient for mismatch regularization term (0 = disabled, SSM handles preference learning)
+  n_updates: 10000  # Total number of training updates (one trajectory per update)
 
 # State Space Model (SSM) for preference prediction
 ssm_type: "gru"  # Options: "pf" (particle filter), "ekf" (extended kalman filter), "mamba", "gru"
@@ -39,13 +36,13 @@ ekf:
 mamba:
   hidden_dim: 256
   num_layers: 2
-  learning_rate: 1.0e-5
+  learning_rate: 1.0e-6
 
 # GRU SSM settings (used if ssm_type == "gru")
 gru:
   hidden_dim: 256
   num_layers: 2
-  learning_rate: 1.0e-5
+  learning_rate: 1.0e-6
 
 # Device
 device: "cuda"

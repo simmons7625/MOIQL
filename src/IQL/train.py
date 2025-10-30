@@ -288,6 +288,9 @@ def train(config: Dict[str, Any]):
     # Create SSM
     ssm = create_ssm(config, n_objectives, obs_dim, action_dim)
 
+    # Extract IQL config (support both new nested format and old flat format for backward compatibility)
+    iql_config = config.get("iql", config)
+
     # Create trainer based on SSM type
     ssm_type = config.get("ssm_type", "pf")
     # Neural SSMs (mamba, gru) use NeuralSSMIQTrainer
@@ -297,13 +300,13 @@ def train(config: Dict[str, Any]):
             action_dim=action_dim,
             n_objectives=n_objectives,
             ssm_model=ssm,
-            hidden_dim=config["hidden_dim"],
-            lr=config["lr"],
-            gamma=config["gamma"],
-            tau=config["tau"],
-            mismatch_coef=config["mismatch_coef"],
+            hidden_dim=iql_config.get("hidden_dim", 256),
+            lr=iql_config.get("lr", 1e-4),
+            gamma=iql_config.get("gamma", 0.99),
+            tau=iql_config.get("tau", 0.005),
+            mismatch_coef=iql_config.get("mismatch_coef", 1.0),
             max_timesteps=config.get("max_timesteps"),
-            device=config["device"],
+            device=config.get("device", "cuda"),
         )
     else:
         # Simple SSMs (pf, ekf) use SSMIQTrainer
@@ -312,13 +315,13 @@ def train(config: Dict[str, Any]):
             action_dim=action_dim,
             n_objectives=n_objectives,
             ssm_model=ssm,
-            hidden_dim=config["hidden_dim"],
-            lr=config["lr"],
-            gamma=config["gamma"],
-            tau=config["tau"],
-            mismatch_coef=config["mismatch_coef"],
+            hidden_dim=iql_config.get("hidden_dim", 256),
+            lr=iql_config.get("lr", 1e-4),
+            gamma=iql_config.get("gamma", 0.99),
+            tau=iql_config.get("tau", 0.005),
+            mismatch_coef=iql_config.get("mismatch_coef", 1.0),
             max_timesteps=config.get("max_timesteps"),
-            device=config["device"],
+            device=config.get("device", "cuda"),
         )
 
     print(f"Device: {trainer.device}")
@@ -345,7 +348,7 @@ def train(config: Dict[str, Any]):
     print("STARTING TRAINING")
     print("=" * 70)
 
-    n_updates = config["n_updates"]
+    n_updates = iql_config.get("n_updates", 10000)
     n_trajectories = len(expert_trajectories)
 
     # Evaluation settings
