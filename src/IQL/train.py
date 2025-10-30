@@ -26,7 +26,7 @@ from src.IQL.simplessm.ssm import ParticleFilter, ExtendedKalmanFilter, StateSpa
 
 # for neural SSMs
 from src.IQL.neuralssm.trainer import NeuralSSMIQTrainer
-from src.IQL.neuralssm.ssm import MambaSSM
+from src.IQL.neuralssm.ssm import MambaSSM, GRUSSM
 
 # Common evaluation function
 
@@ -179,7 +179,19 @@ def create_ssm(
             action_dim=action_dim,
             n_objectives=n_objectives,
             hidden_dim=mamba_config.get("hidden_dim", 256),
+            num_layers=mamba_config.get("num_layers", 1),
             learning_rate=mamba_config.get("learning_rate", 0.001),
+            device=config.get("device", "cuda"),
+        )
+    elif full_type == "gru":
+        gru_config = config.get("gru", {})
+        ssm = GRUSSM(
+            obs_dim=obs_dim,
+            action_dim=action_dim,
+            n_objectives=n_objectives,
+            hidden_dim=gru_config.get("hidden_dim", 256),
+            num_layers=gru_config.get("num_layers", 1),
+            learning_rate=gru_config.get("learning_rate", 0.001),
             device=config.get("device", "cuda"),
         )
     else:

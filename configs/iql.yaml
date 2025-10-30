@@ -19,7 +19,7 @@ tau: 0.005  # Expectile parameter for value function update
 n_updates: 10000  # Total number of training updates (one trajectory per update)
 
 # State Space Model (SSM) for preference prediction
-ssm_type: "mamba"  # Options: "pf" (particle filter), "ekf" (extended kalman filter), "mamba"
+ssm_type: "mamba"  # Options: "pf" (particle filter), "ekf" (extended kalman filter), "mamba", "gru"
 
 # Particle Filter settings (used if ssm_type == "pf")
 particle_filter:
@@ -35,10 +35,17 @@ ekf:
   initial_noise: 0.1
   beta: 1.0  # Temperature for margin->probability (higher = sharper distribution)
 
-# Mamba SSM settings (use if ssm_type == "mamba")
+# Mamba SSM settings (used if ssm_type == "mamba")
 mamba:
   hidden_dim: 256
-  learning_rate: 1.0e-4
+  num_layers: 2
+  learning_rate: 1.0e-5
+
+# GRU SSM settings (used if ssm_type == "gru")
+gru:
+  hidden_dim: 256
+  num_layers: 2
+  learning_rate: 1.0e-5
 
 # Device
 device: "cuda"
