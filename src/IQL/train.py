@@ -20,8 +20,16 @@ import wandb
 import yaml
 from tqdm import tqdm
 
-from src.IQL.trainer import ODSQILTrainer
-from src.IQL.ssm import StateSpaceModel, ParticleFilter, ExtendedKalmanFilter, NeuralSSM
+# for non neural SSMs
+from src.IQL.simplessm.trainer import SSMIQTrainer
+from src.IQL.simplessm.ssm import ParticleFilter, ExtendedKalmanFilter, StateSpaceModel
+
+# for neural SSMs
+from src.IQL.neuralssm.trainer import NeuralSSMIQTrainer
+from src.IQL.neuralssm.ssm import MambaSSM
+
+# Common evaluation function
+from src.IQL.evaluation import evaluate
 
 # Suppress warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="pygame.pkgdata")
@@ -93,18 +101,16 @@ def load_expert_config(expert_dir: str) -> Dict[str, Any]:
     return training_config
 
 
-def load_expert_trajectories(
-    expert_dir: str, n_trajectories: int = None
-) -> Dict[str, np.ndarray]:
+def load_expert_trajectories(expert_dir: str, n_trajectories: int = None) -> list:
     """
-    Load expert trajectories from JSON file.
+    Load expert trajectories in raw format (list of trajectories).
 
     Args:
         expert_dir: Directory containing trajectories.json
         n_trajectories: Number of trajectories to load (None = load all)
 
     Returns:
-        Dictionary with states, actions, rewards, next_states, dones arrays
+        List of trajectory dictionaries
     """
     expert_path = Path(expert_dir)
     traj_path = expert_path / "trajectories.json"
@@ -120,75 +126,10 @@ def load_expert_trajectories(
     if n_trajectories is not None and n_trajectories < len(trajectories):
         indices = np.random.choice(len(trajectories), n_trajectories, replace=False)
         trajectories = [trajectories[i] for i in indices]
-        print(f"Sampled {n_trajectories} trajectories from {len(trajectories)} total")
+        print(f"Sampled {n_trajectories} trajectories from total")
 
-    # Collect all transitions from selected trajectories
-    states = []
-    actions = []
-    mo_rewards = []
-    preference_weights = []
-    next_states = []
-    dones = []
-    initial_states = []
-    initial_actions = []
-    initial_preferences = []
-
-    skipped_count = 0
-    for traj in trajectories:
-        traj_states = np.array(traj["observations"])
-        traj_actions = np.array(traj["actions"])
-        traj_rewards = np.array(traj["mo_rewards"])
-        traj_prefs = np.array(traj["preference_weights"])
-
-        # Add all transitions from this trajectory
-        T = len(traj_states) - 1  # number of transitions
-
-        # Skip trajectories that are too short (need at least 1 transition)
-        if T <= 0:
-            skipped_count += 1
-            continue
-
-        states.append(traj_states[:-1])  # s_t
-        actions.append(traj_actions)  # a_t
-        mo_rewards.append(traj_rewards)  # r_t
-        preference_weights.append(traj_prefs[:-1])  # pref at s_t
-        next_states.append(traj_states[1:])  # s_{t+1}
-
-        # Last transition is terminal
-        done_flags = np.zeros(T, dtype=bool)
-        done_flags[-1] = True
-        dones.append(done_flags)
-
-        # Store initial state separately for each trajectory
-        initial_states.append(traj_states[0])  # First state
-        initial_actions.append(traj_actions[0])  # First action
-        initial_preferences.append(traj_prefs[0])  # First preference
-
-    if skipped_count > 0:
-        print(f"Skipped {skipped_count} trajectories with no transitions")
-
-    # Convert to numpy arrays
-    data = {
-        "states": np.concatenate(states, axis=0),
-        "actions": np.concatenate(actions, axis=0),
-        "rewards": np.concatenate(mo_rewards, axis=0),
-        "preference_weights": np.concatenate(preference_weights, axis=0),
-        "next_states": np.concatenate(next_states, axis=0),
-        "dones": np.concatenate(dones, axis=0),
-        "initial_states": np.array(initial_states),
-        "initial_actions": np.array(initial_actions),
-        "initial_preferences": np.array(initial_preferences),
-    }
-
-    n_valid_trajectories = len(trajectories) - skipped_count
-    print(
-        f"Loaded {n_valid_trajectories} valid trajectories (skipped {skipped_count}) with {len(data['states'])} total transitions"
-    )
-    print(f"  States shape: {data['states'].shape}")
-    print(f"  Actions shape: {data['actions'].shape}")
-    print(f"  Rewards shape: {data['rewards'].shape}")
-
-    return data
+    print(f"Loaded {len(trajectories)} trajectories")
+    return trajectories
 
 
 def create_ssm(
@@ -205,10 +146,13 @@ def create_ssm(
         "extended_kalman_filter": "extended_kalman_filter",
         "neural": "neural_ssm",
         "neural_ssm": "neural_ssm",
+        "mamba": "mamba",
     }
 
     if ssm_type not in type_mapping:
-        raise ValueError(f"Unsupported SSM type: {ssm_type}. Options: pf, ekf, neural")
+        raise ValueError(
+            f"Unsupported SSM type: {ssm_type}. Options: pf, ekf, neural, mamba"
+        )
 
     full_type = type_mapping[ssm_type]
 
@@ -227,16 +171,16 @@ def create_ssm(
             process_noise=ekf_config.get("process_noise", 0.01),
             observation_noise=ekf_config.get("observation_noise", 0.1),
             initial_variance=ekf_config.get("initial_variance", 0.1),
+            beta=ekf_config.get("beta", 5.0),
         )
-    elif full_type == "neural_ssm":
-        neural_config = config.get("neural_ssm", {})
-        ssm = NeuralSSM(
+    elif full_type == "mamba":
+        mamba_config = config.get("mamba", {})
+        ssm = MambaSSM(
             obs_dim=obs_dim,
             action_dim=action_dim,
             n_objectives=n_objectives,
-            hidden_dim=neural_config.get("hidden_dim", 64),
-            n_layers=neural_config.get("n_layers", 2),
-            learning_rate=neural_config.get("learning_rate", 0.001),
+            hidden_dim=mamba_config.get("hidden_dim", 256),
+            learning_rate=mamba_config.get("learning_rate", 0.001),
             device=config.get("device", "cuda"),
         )
     else:
@@ -268,7 +212,7 @@ def save_configs(
 
 def save_model_and_info(
     save_dir: Path,
-    trainer: ODSQILTrainer,
+    trainer,
 ):
     """Save model and model info after training."""
     # Save model
@@ -291,50 +235,6 @@ def save_model_and_info(
     print(f"Saved model info to {model_info_path}")
 
 
-def evaluate(
-    trainer: ODSQILTrainer,
-    expert_data: Dict[str, np.ndarray],
-    n_samples: int = 100,
-) -> Dict[str, Any]:
-    """
-    Evaluate preference prediction accuracy on expert data.
-
-    Args:
-        trainer: OD-SQIL trainer
-        expert_data: Dictionary containing expert trajectories
-        n_samples: Number of samples to evaluate
-
-    Returns:
-        Dictionary containing:
-        - mean_preference_mae: Mean absolute error for preference prediction
-        - std_preference_mae: Std of preference MAE
-    """
-    # Sample random transitions from expert data
-    n_data = len(expert_data["states"])
-    indices = np.random.choice(n_data, min(n_samples, n_data), replace=False)
-
-    preference_errors = []
-
-    for idx in indices:
-        state = expert_data["states"][idx]
-        action = expert_data["actions"][idx]
-        true_pref = expert_data["preference_weights"][idx]
-
-        # Get predicted preference from SSM
-        pred_pref = trainer.ssm.predict(state, action)
-
-        # Compute MAE for first objective (treasure weight)
-        pref_error = np.abs(pred_pref[0] - true_pref[0])
-        preference_errors.append(pref_error)
-
-    results = {
-        "mean_preference_mae": np.mean(preference_errors),
-        "std_preference_mae": np.std(preference_errors),
-    }
-
-    return results
-
-
 def train(config: Dict[str, Any]):
     """Main training function."""
     # Load expert configuration and trajectories
@@ -344,7 +244,7 @@ def train(config: Dict[str, Any]):
 
     print(f"Loading expert data from: {expert_dir}")
     expert_config = load_expert_config(str(expert_dir))
-    expert_data = load_expert_trajectories(
+    expert_trajectories = load_expert_trajectories(
         str(expert_dir), n_trajectories=config.get("n_trajectories")
     )
 
@@ -363,10 +263,11 @@ def train(config: Dict[str, Any]):
     print(f"  max_num_treasure: {env_config.get('max_num_treasure')}")
     print(f"  max_timesteps: {env_config.get('max_timesteps')}")
 
-    # Get dimensions from expert data
-    obs_dim = expert_data["states"].shape[1]
-    action_dim = int(expert_data["actions"].max() + 1)  # Discrete actions
-    n_objectives = expert_data["preference_weights"].shape[1]
+    # Get dimensions from expert trajectories
+    sample_traj = expert_trajectories[0]
+    obs_dim = len(sample_traj["observations"][0])
+    action_dim = max(max(traj["actions"]) for traj in expert_trajectories) + 1
+    n_objectives = len(sample_traj["preference_weights"][0])
 
     print(f"Observation dim: {obs_dim}")
     print(f"Action dim: {action_dim}")
@@ -375,20 +276,36 @@ def train(config: Dict[str, Any]):
     # Create SSM
     ssm = create_ssm(config, n_objectives, obs_dim, action_dim)
 
-    # Create trainer
-    trainer = ODSQILTrainer(
-        obs_dim=obs_dim,
-        action_dim=action_dim,
-        n_objectives=n_objectives,
-        ssm_model=ssm,
-        hidden_dim=config["hidden_dim"],
-        lr=config["lr"],
-        gamma=config["gamma"],
-        tau=config["tau"],
-        mismatch_coef=config["mismatch_coef"],
-        max_timesteps=config.get("max_timesteps"),
-        device=config["device"],
-    )
+    # Create trainer based on SSM type
+    ssm_type = config.get("ssm_type", "pf")
+    if ssm_type == "mamba":
+        trainer = NeuralSSMIQTrainer(
+            obs_dim=obs_dim,
+            action_dim=action_dim,
+            n_objectives=n_objectives,
+            ssm_model=ssm,
+            hidden_dim=config["hidden_dim"],
+            lr=config["lr"],
+            gamma=config["gamma"],
+            tau=config["tau"],
+            mismatch_coef=config["mismatch_coef"],
+            max_timesteps=config.get("max_timesteps"),
+            device=config["device"],
+        )
+    else:
+        trainer = SSMIQTrainer(
+            obs_dim=obs_dim,
+            action_dim=action_dim,
+            n_objectives=n_objectives,
+            ssm_model=ssm,
+            hidden_dim=config["hidden_dim"],
+            lr=config["lr"],
+            gamma=config["gamma"],
+            tau=config["tau"],
+            mismatch_coef=config["mismatch_coef"],
+            max_timesteps=config.get("max_timesteps"),
+            device=config["device"],
+        )
 
     print(f"Device: {trainer.device}")
     print(f"Model parameters: {sum(p.numel() for p in trainer.q_network.parameters())}")
@@ -414,68 +331,75 @@ def train(config: Dict[str, Any]):
     print("STARTING TRAINING")
     print("=" * 70)
 
-    batch_size = config["batch_size"]
     n_updates = config["n_updates"]
-    n_data = len(expert_data["states"])
+    n_trajectories = len(expert_trajectories)
 
     # Evaluation settings
     eval_interval = config.get("eval_interval", 100)
-    eval_episodes = config.get("eval_episodes", 10)
 
     # Metrics tracking
     import csv
 
-    metrics_file = results_dir / "metrics.csv"
-    csv_writer = None
-    csv_file = None
+    eval_metrics_file = results_dir / "eval_metrics.csv"
+    train_metrics_file = results_dir / "train_metrics.csv"
+    eval_csv_writer = None
+    eval_csv_file = None
+    train_csv_writer = None
+    train_csv_file = None
 
-    # Get number of initial states available
-    n_initial_states = len(expert_data["initial_states"])
+    # Best model tracking and early stopping
+    best_eval_score = float("inf")
+    best_cross_entropy = None
+    best_preference_mae = None
+    best_update = 0
+    patience_counter = 0
+    early_stopping_patience = config.get("early_stopping_patience", 0)
 
     for update in tqdm(range(n_updates), desc="Training Updates"):
-        # Sample batch from expert trajectories
-        indices = np.random.choice(n_data, batch_size, replace=True)
+        # Sample one trajectory randomly
+        traj_idx = np.random.randint(0, n_trajectories)
+        trajectory = expert_trajectories[traj_idx]
 
-        batch_states = expert_data["states"][indices]
-        batch_actions = expert_data["actions"][indices]
-        batch_rewards = expert_data["rewards"][indices]
-        batch_next_states = expert_data["next_states"][indices]
-        batch_dones = expert_data["dones"][indices]
+        # Update Q-network with this trajectory
+        train_metrics = trainer.update(trajectory)
 
-        # Sample initial states (sample randomly from available initial states)
-        init_indices = np.random.choice(n_initial_states, size=batch_size, replace=True)
-        batch_initial_states = expert_data["initial_states"][init_indices]
-        batch_initial_actions = expert_data["initial_actions"][init_indices]
-        batch_initial_preferences = expert_data["initial_preferences"][init_indices]
+        # Log training metrics
+        train_log = {
+            "update": update + 1,
+            "train_loss": train_metrics["loss"],
+            "train_preference_mae": train_metrics["preference_mae"],
+            "train_cross_entropy": train_metrics["cross_entropy"],
+        }
 
-        # Update Q-network with expert data
-        losses = trainer.update(
-            states=batch_states,
-            actions=batch_actions,
-            rewards=batch_rewards,
-            next_states=batch_next_states,
-            dones=batch_dones,
-            is_expert=np.ones(batch_size, dtype=np.float32),  # All expert data
-            initial_states=batch_initial_states,
-            initial_actions=batch_initial_actions,
-            initial_preferences=batch_initial_preferences,
-        )
+        # Add SSM loss if available
+        if "ssm_loss" in train_metrics:
+            train_log["train_ssm_loss"] = train_metrics["ssm_loss"]
 
-        # Log training losses
-        if (update + 1) % 10 == 0:
-            log_dict = {
-                "update": update + 1,
-                "total_loss": losses["total_loss"],
-                "soft_iq_loss": losses["soft_iq_loss"],
-                "mismatch_loss": losses["mismatch_loss"],
+        # Save to train CSV
+        if train_csv_writer is None:
+            train_csv_file = open(train_metrics_file, "w", newline="")
+            train_fieldnames = list(train_log.keys())
+            train_csv_writer = csv.DictWriter(
+                train_csv_file, fieldnames=train_fieldnames
+            )
+            train_csv_writer.writeheader()
+
+        train_csv_writer.writerow(train_log)
+        train_csv_file.flush()
+
+        # Log to wandb
+        if config.get("use_wandb", False):
+            wandb_log = {
+                "train/loss": train_metrics["loss"],
+                "train/preference_mae": train_metrics["preference_mae"],
+                "train/cross_entropy": train_metrics["cross_entropy"],
             }
 
-            # Log preference weights
-            for i, w in enumerate(losses["mean_preference"]):
-                log_dict[f"preference_obj{i}"] = w
+            # Add SSM loss if available
+            if "ssm_loss" in train_metrics:
+                wandb_log["train/ssm_loss"] = train_metrics["ssm_loss"]
 
-            if config.get("use_wandb", False):
-                wandb.log(log_dict, step=update + 1)
+            wandb.log(wandb_log, step=update + 1)
 
         # Evaluate periodically
         if (update + 1) % eval_interval == 0 or update == 0:
@@ -483,61 +407,222 @@ def train(config: Dict[str, Any]):
             print(f"Evaluation at update {update + 1}/{n_updates}")
             print(f"{'='*70}")
 
-            # Evaluate preference prediction accuracy on expert data
-            eval_metrics = evaluate(trainer, expert_data, n_samples=eval_episodes * 10)
+            # Evaluate preference prediction accuracy on expert trajectories
+            eval_weights_config = config.get("eval_weights")
+            eval_weights_np = (
+                np.array(eval_weights_config)
+                if eval_weights_config is not None
+                else None
+            )
+            eval_metrics = evaluate(
+                trainer,
+                expert_dir=str(expert_dir),
+                n_trajectories=config.get("n_trajectories"),
+                save_dir=str(results_dir / "eval_predictions"),
+                update_step=update + 1,
+                eval_weights=eval_weights_np,
+            )
 
             # Combine metrics
             all_metrics = {
                 "update": update + 1,
-                **losses,
                 **eval_metrics,
             }
 
             # Print key metrics
-            print("Preference Prediction Performance:")
+            print("Evaluation Performance:")
             print(
                 f"  Preference MAE: {eval_metrics['mean_preference_mae']:.4f} ± {eval_metrics['std_preference_mae']:.4f}"
             )
+            print(
+                f"  Cross-Entropy (Imitation): {eval_metrics['mean_cross_entropy']:.4f} ± {eval_metrics['std_cross_entropy']:.4f}"
+            )
+            if "mean_eval_score" in eval_metrics:
+                print(
+                    f"  Eval Score (w1*CE + w2*MAE): {eval_metrics['mean_eval_score']:.4f} ± {eval_metrics['std_eval_score']:.4f}"
+                )
 
             # Log to wandb
             if config.get("use_wandb", False):
-                wandb.log(
-                    {
-                        "eval/preference_mae_mean": eval_metrics["mean_preference_mae"],
-                        "eval/preference_mae_std": eval_metrics["std_preference_mae"],
-                    },
-                    step=update + 1,
+                wandb_log_dict = {
+                    "eval/preference_mae_mean": eval_metrics["mean_preference_mae"],
+                    "eval/preference_mae_std": eval_metrics["std_preference_mae"],
+                    "eval/cross_entropy_mean": eval_metrics["mean_cross_entropy"],
+                    "eval/cross_entropy_std": eval_metrics["std_cross_entropy"],
+                }
+                if "mean_eval_score" in eval_metrics:
+                    wandb_log_dict["eval/eval_score_mean"] = eval_metrics[
+                        "mean_eval_score"
+                    ]
+                    wandb_log_dict["eval/eval_score_std"] = eval_metrics[
+                        "std_eval_score"
+                    ]
+
+                wandb.log(wandb_log_dict, step=update + 1)
+
+            # Save to eval CSV
+            if eval_csv_writer is None:
+                eval_csv_file = open(eval_metrics_file, "w", newline="")
+                fieldnames = list(all_metrics.keys())
+                eval_csv_writer = csv.DictWriter(eval_csv_file, fieldnames=fieldnames)
+                eval_csv_writer.writeheader()
+
+            eval_csv_writer.writerow(all_metrics)
+            eval_csv_file.flush()
+
+            # Check if this is the best model so far based on eval_score
+            current_cross_entropy = eval_metrics["mean_cross_entropy"]
+            current_preference_mae = eval_metrics["mean_preference_mae"]
+
+            # Use eval_score if available, otherwise fall back to combined criteria
+            if "mean_eval_score" in eval_metrics:
+                current_eval_score = eval_metrics["mean_eval_score"]
+                is_improvement = current_eval_score < best_eval_score
+
+                if is_improvement:
+                    best_eval_score = current_eval_score
+                    best_cross_entropy = current_cross_entropy
+                    best_preference_mae = current_preference_mae
+                    best_update = update + 1
+                    patience_counter = 0  # Reset patience counter
+
+                    # Save best model
+                    best_model_path = results_dir / "best_model.pt"
+                    trainer.save(str(best_model_path))
+                    print(f"\n{'='*70}")
+                    print("NEW BEST MODEL!")
+                    print(f"  Eval Score: {best_eval_score:.4f}")
+                    print(f"  Cross-Entropy: {best_cross_entropy:.4f}")
+                    print(f"  Preference MAE: {best_preference_mae:.4f}")
+                    print(f"Saved to {best_model_path}")
+                    print(f"{'='*70}\n")
+
+                    # Save best model info
+                    best_info = {
+                        "best_eval_score": float(best_eval_score),
+                        "best_cross_entropy": float(best_cross_entropy),
+                        "best_preference_mae": float(best_preference_mae),
+                        "best_update": int(best_update),
+                        "total_updates": n_updates,
+                    }
+                    best_info_path = results_dir / "best_model_info.json"
+                    with open(best_info_path, "w") as f:
+                        json.dump(best_info, f, indent=2)
+                else:
+                    # No improvement
+                    patience_counter += 1
+                    if early_stopping_patience > 0:
+                        print(
+                            f"No improvement for {patience_counter}/{early_stopping_patience} evaluations"
+                        )
+                        print(
+                            f"  Current Eval Score: {current_eval_score:.4f} (CE={current_cross_entropy:.4f}, MAE={current_preference_mae:.4f})"
+                        )
+                        print(
+                            f"  Best Eval Score:    {best_eval_score:.4f} (CE={best_cross_entropy:.4f}, MAE={best_preference_mae:.4f})"
+                        )
+            else:
+                # Fallback: use original logic if eval_score not available
+                cross_entropy_improved = current_cross_entropy < (
+                    best_cross_entropy
+                    if best_cross_entropy is not None
+                    else float("inf")
+                )
+                preference_mae_improved = current_preference_mae < (
+                    best_preference_mae
+                    if best_preference_mae is not None
+                    else float("inf")
                 )
 
-            # Save to CSV
-            if csv_writer is None:
-                csv_file = open(metrics_file, "w", newline="")
-                fieldnames = list(all_metrics.keys())
-                csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
-                csv_writer.writeheader()
+                is_improvement = (
+                    cross_entropy_improved
+                    and (
+                        best_preference_mae is None
+                        or current_preference_mae <= best_preference_mae
+                    )
+                ) or (
+                    preference_mae_improved
+                    and (
+                        best_cross_entropy is None
+                        or current_cross_entropy <= best_cross_entropy
+                    )
+                )
 
-            csv_writer.writerow(all_metrics)
-            csv_file.flush()
+                if is_improvement:
+                    best_cross_entropy = current_cross_entropy
+                    best_preference_mae = current_preference_mae
+                    best_update = update + 1
+                    patience_counter = 0
 
-        # Progress update
-        if (update + 1) % eval_interval == 0:
-            pref_str = ", ".join([f"{w:.3f}" for w in losses["mean_preference"]])
-            print(
-                f"Update {update + 1}/{n_updates} | "
-                f"Loss: {losses['total_loss']:.4f} | "
-                f"Pref: [{pref_str}]"
-            )
+                    best_model_path = results_dir / "best_model.pt"
+                    trainer.save(str(best_model_path))
+                    print(f"\n{'='*70}")
+                    print("NEW BEST MODEL!")
+                    print(f"  Cross-Entropy: {best_cross_entropy:.4f}")
+                    print(f"  Preference MAE: {best_preference_mae:.4f}")
+                    print(f"Saved to {best_model_path}")
+                    print(f"{'='*70}\n")
 
-    # Close CSV file
-    if csv_file is not None:
-        csv_file.close()
+                    best_info = {
+                        "best_cross_entropy": float(best_cross_entropy),
+                        "best_preference_mae": float(best_preference_mae),
+                        "best_update": int(best_update),
+                        "total_updates": n_updates,
+                    }
+                    best_info_path = results_dir / "best_model_info.json"
+                    with open(best_info_path, "w") as f:
+                        json.dump(best_info, f, indent=2)
+                else:
+                    patience_counter += 1
+                    if early_stopping_patience > 0:
+                        print(
+                            f"No improvement for {patience_counter}/{early_stopping_patience} evaluations"
+                        )
+                        print(
+                            f"  Current: CE={current_cross_entropy:.4f}, MAE={current_preference_mae:.4f}"
+                        )
+                        print(
+                            f"  Best:    CE={best_cross_entropy:.4f}, MAE={best_preference_mae:.4f}"
+                        )
+
+            # Check early stopping
+            if (
+                early_stopping_patience > 0
+                and patience_counter >= early_stopping_patience
+            ):
+                print(f"\n{'='*70}")
+                print("EARLY STOPPING TRIGGERED")
+                print(f"No improvement for {patience_counter} consecutive evaluations")
+                print(f"Best model was at update {best_update}:")
+                if best_eval_score != float("inf"):
+                    print(f"  Eval Score: {best_eval_score:.4f}")
+                if best_cross_entropy is not None:
+                    print(f"  Cross-Entropy: {best_cross_entropy:.4f}")
+                if best_preference_mae is not None:
+                    print(f"  Preference MAE: {best_preference_mae:.4f}")
+                print(f"{'='*70}\n")
+                break
+
+    # Close CSV files
+    if train_csv_file is not None:
+        train_csv_file.close()
+    if eval_csv_file is not None:
+        eval_csv_file.close()
 
     print("\n" + "=" * 70)
     print("TRAINING COMPLETED")
+    if early_stopping_patience > 0 and patience_counter >= early_stopping_patience:
+        print(f"Stopped early after {update + 1} updates (patience exhausted)")
+    else:
+        print(f"Completed all {n_updates} updates")
     print("=" * 70)
-
-    # Save final model and info
-    save_model_and_info(results_dir, trainer)
+    print(f"\nBest model at update {best_update}:")
+    if best_eval_score != float("inf"):
+        print(f"  Eval Score: {best_eval_score:.4f}")
+    if best_cross_entropy is not None:
+        print(f"  Cross-Entropy: {best_cross_entropy:.4f}")
+    if best_preference_mae is not None:
+        print(f"  Preference MAE: {best_preference_mae:.4f}")
 
     if config.get("use_wandb", False):
         wandb.finish()

@@ -12,13 +12,13 @@ import torch
 from pathlib import Path
 from typing import Dict
 
-from .actor_critic import ActorCritic
-from .ssm import StateSpaceModel, compute_mismatch
+from ..actor_critic import ActorCritic
+from .ssm import StateSpaceModel, MambaSSM, compute_mismatch
 
 
-class ODSQILTrainer:
+class NeuralSSMIQTrainer:
     """
-    Objective-Dimensional Soft Inverse Q-Learning Trainer.
+    Neural SSM-based IQL Trainer for MambaSSM.
 
     Combines soft IQL with preference weight prediction for multi-objective RL.
     """
@@ -181,7 +181,7 @@ class ODSQILTrainer:
             v_next = torch.sum(pi_next * q_next_scalar, dim=1)  # [batch]
 
         # ===== Compute current Q scalar =====
-        q_expert = torch.einsum("bo,bo->b", q_current, preference_weights)
+        q_expert = torch.einsum("bo,bo->b", preference_weights, q_current)  # [batch]
 
         # Soft IQ loss: -(Q(s,a) - gamma * V(s')) + (1 - gamma) * V(s_0)
         # where V(s) = E_{a~π(·|s)}[Q(s,a)] = Σ_a π(a|s) * Q(s,a)
@@ -191,133 +191,167 @@ class ODSQILTrainer:
 
         # ===== Mismatch Regularization =====
         # For expert data, add mismatch between predicted preference and expert Q direction
-        mismatch_loss = compute_mismatch(
-            preference=preference_weights, q_values_all=q_current
-        ).mean()
+        mismatch_loss = compute_mismatch(preference_weights, q_current).mean()
 
         # ===== Total Loss =====
         total_loss = soft_iq_loss + self.mismatch_coef * mismatch_loss
 
-        return {
-            "total_loss": total_loss,
-            "soft_iq_loss": soft_iq_loss,
-            "mismatch_loss": mismatch_loss,
-        }
+        return total_loss
 
-    def update(
-        self,
-        states: np.ndarray,
-        actions: np.ndarray,
-        rewards: np.ndarray,
-        next_states: np.ndarray,
-        dones: np.ndarray,
-        is_expert: np.ndarray,
-        initial_states: np.ndarray,
-        initial_actions: np.ndarray,
-        initial_preferences: np.ndarray,
-    ) -> Dict[str, float]:
+    def update(self, trajectory: Dict) -> Dict[str, float]:
         """
-        Update Q-network with a batch of data.
+        Update Q-network with a single trajectory using sequence-wise processing.
 
         Args:
-            states: [batch, obs_dim]
-            actions: [batch]
-            rewards: [batch, n_objectives]
-            next_states: [batch, obs_dim]
-            dones: [batch]
-            is_expert: [batch] - 1 for expert, 0 for agent
-            initial_states: [batch, obs_dim] - initial states from episodes
-            initial_actions: [batch] - actions at initial states
-            initial_preferences: [batch, n_objectives] - preferences at initial states
+            trajectory: Dictionary containing:
+                - observations: [T, obs_dim]
+                - actions: [T]
+                - mo_rewards: [T, n_objectives]
+                - preference_weights: [T, n_objectives]
 
         Returns:
-            Dictionary of loss values
+            Dictionary of metrics including:
+                - loss: Training loss
+                - preference_mae: Mean absolute error for preference prediction
+                - cross_entropy: Cross-entropy loss (imitation metric)
+                - ssm_loss: SSM training loss
         """
-        # Convert to tensors
-        states_t = torch.FloatTensor(states).to(self.device)
-        actions_t = torch.LongTensor(actions).to(self.device)
-        next_states_t = torch.FloatTensor(next_states).to(self.device)
+        traj_states = np.array(trajectory["observations"])
+        traj_actions = np.array(trajectory["actions"])
+        traj_prefs = np.array(trajectory["preference_weights"])
+        T = len(traj_states)
 
-        # Convert initial states to tensors
-        initial_states_t = torch.FloatTensor(initial_states).to(self.device)
-        initial_preferences_t = torch.FloatTensor(initial_preferences).to(self.device)
+        # Get Q-values for all timesteps
+        with torch.no_grad():
+            states_tensor = torch.FloatTensor(traj_states).to(
+                self.device
+            )  # [T, obs_dim]
+            _, q_values_all_traj = self.q_network.act(
+                states_tensor
+            )  # [T, action_dim, n_objectives]
+            q_values_all_np = q_values_all_traj.cpu().numpy()
 
-        # Update SSM to get current preference estimate for each transition
-        batch_size = states.shape[0]
-        preference_weights = np.zeros((batch_size, self.n_objectives))
-
-        for i in range(batch_size):
-            # Get Q-values for all actions for SSM update
-            with torch.no_grad():
-                _, q_values_all_batch = self.q_network.act(
-                    states_t[i : i + 1]
-                )  # [1, action_dim, n_objectives]
-                q_values_all = (
-                    q_values_all_batch[0].cpu().numpy()
-                )  # [action_dim, n_objectives]
-
-            # Update SSM with action likelihood
-            self.ssm.update(
-                observation=states[i],
-                action=actions[i],
-                q_values_all=q_values_all,
-                next_observation=next_states[i],
-            )
-
-            # Get current preference estimate
-            preference_weights[i] = self.ssm.predict(states[i], actions[i])
-
-        self.current_preference = np.mean(preference_weights, axis=0)
-        preference_weights_t = torch.FloatTensor(preference_weights).to(self.device)
-
-        # ===== Update Q-network =====
-        q_loss_dict = self.compute_soft_iq_loss(
-            states_t,
-            actions_t,
-            next_states_t,
-            preference_weights_t,
-            initial_states_t,
-            initial_preferences_t,
+        # Train SSM on full trajectory sequence
+        ssm_loss = self.ssm.train_trajectory(
+            observations=traj_states, actions=traj_actions, q_values_all=q_values_all_np
         )
 
-        # Backward pass for Q
-        self.q_optimizer.zero_grad()
-        q_total_loss = q_loss_dict["total_loss"]
-        q_total_loss.backward()
-        self.q_optimizer.step()
+        # Predict preferences for entire trajectory
+        predicted_preferences = self.ssm.predict_sequence(
+            traj_states
+        )  # [T, n_objectives]
 
-        # Soft update target network
+        # Compute preference MAE
+        preference_errors = np.abs(predicted_preferences[:, 0] - traj_prefs[:, 0])
+        preference_mae = np.mean(preference_errors)
+
+        # Compute cross-entropy for imitation learning metric
+        cross_entropies = []
+        for t in range(T):
+            state_t = torch.FloatTensor(traj_states[t]).unsqueeze(0).to(self.device)
+            pred_pref_t = (
+                torch.FloatTensor(predicted_preferences[t]).unsqueeze(0).to(self.device)
+            )
+            action_t = torch.LongTensor([traj_actions[t]]).to(self.device)
+
+            with torch.no_grad():
+                logits, _ = self.q_network.act(state_t, pred_pref_t)
+                ce_loss = torch.nn.functional.cross_entropy(
+                    logits, action_t, reduction="none"
+                )
+                cross_entropies.append(ce_loss.item())
+
+        # Compute Q-network training loss
+        initial_state = traj_states[0]
+        initial_preference = predicted_preferences[0]
+
+        losses = []
+        for t in range(T - 1):
+            state = traj_states[t]
+            action = traj_actions[t]
+            next_state = traj_states[t + 1]
+            predicted_preference = predicted_preferences[t]
+
+            loss = self.compute_soft_iq_loss(
+                states=torch.FloatTensor(state).unsqueeze(0).to(self.device),
+                actions=torch.LongTensor([action]).to(self.device),
+                next_states=torch.FloatTensor(next_state).unsqueeze(0).to(self.device),
+                preference_weights=torch.FloatTensor(predicted_preference)
+                .unsqueeze(0)
+                .to(self.device),
+                initial_states=torch.FloatTensor(initial_state)
+                .unsqueeze(0)
+                .to(self.device),
+                initial_preferences=torch.FloatTensor(initial_preference)
+                .unsqueeze(0)
+                .to(self.device),
+            )
+            losses.append(loss)
+
+        mean_loss = torch.stack(losses).mean()
+
+        # Update Q-network
+        self.q_optimizer.zero_grad()
+        mean_loss.backward()
+        self.q_optimizer.step()
         self._soft_update()
 
-        # Convert losses to scalars for logging
-        losses = {
-            "total_loss": q_loss_dict["total_loss"].item(),
-            "soft_iq_loss": q_loss_dict["soft_iq_loss"].item(),
-            "mismatch_loss": q_loss_dict["mismatch_loss"].item(),
-            "mean_preference": self.current_preference.tolist(),
+        # Update SSM
+        self.ssm.step(ssm_loss)
+
+        metrics = {
+            "loss": mean_loss.item(),
+            "preference_mae": preference_mae,
+            "cross_entropy": np.mean(cross_entropies),
+            "ssm_loss": ssm_loss.item(),
         }
 
-        return losses
+        return metrics
 
     def save(self, path: str):
         """Save model checkpoint."""
         save_path = Path(path)
         save_path.parent.mkdir(parents=True, exist_ok=True)
 
-        torch.save(
-            {
-                "q_network": self.q_network.state_dict(),
-                "q_target": self.q_target.state_dict(),
-                "q_optimizer": self.q_optimizer.state_dict(),
-                "current_preference": self.current_preference,
-            },
-            save_path,
-        )
+        checkpoint = {
+            "q_network": self.q_network.state_dict(),
+            "q_target": self.q_target.state_dict(),
+            "q_optimizer": self.q_optimizer.state_dict(),
+            "current_preference": self.current_preference,
+        }
+
+        torch.save(checkpoint, save_path)
+
+        # Save SSM separately
+        if isinstance(self.ssm, MambaSSM):
+            ssm_path = save_path.parent / f"{save_path.stem}_ssm.pt"
+            torch.save(
+                {
+                    "model_state_dict": self.ssm.model.state_dict(),
+                    "optimizer_state_dict": self.ssm.optimizer.state_dict(),
+                },
+                ssm_path,
+            )
 
     def load(self, path: str):
         """Load model checkpoint."""
-        checkpoint = torch.load(path, map_location=self.device)
+        save_path = Path(path)
+
+        # Load Q-network
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         self.q_network.load_state_dict(checkpoint["q_network"])
         self.q_target.load_state_dict(checkpoint["q_target"])
         self.q_optimizer.load_state_dict(checkpoint["q_optimizer"])
         self.current_preference = checkpoint["current_preference"]
+
+        # Load SSM if file exists
+        if isinstance(self.ssm, MambaSSM):
+            ssm_path = save_path.parent / f"{save_path.stem}_ssm.pt"
+            if ssm_path.exists():
+                ssm_checkpoint = torch.load(
+                    ssm_path, map_location=self.ssm.device, weights_only=True
+                )
+                self.ssm.model.load_state_dict(ssm_checkpoint["model_state_dict"])
+                self.ssm.optimizer.load_state_dict(
+                    ssm_checkpoint["optimizer_state_dict"]
+                )

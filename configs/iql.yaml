@@ -10,37 +10,35 @@ n_trajectories: 100  # Number of trajectories to use from expert dataset
 hidden_dim: 256
 
 # IQL-specific hyperparameters
-lr: 1.0e-4  # Learning rate
+lr: 1.0e-5  # Learning rate
 gamma: 0.99  # Discount factor
-mismatch_coef: 1.0  # Coefficient for mismatch regularization term
+mismatch_coef: 100.0  # Coefficient for mismatch regularization term (0 = disabled, SSM handles preference learning)
 tau: 0.005  # Expectile parameter for value function update
 
 # Training settings
-batch_size: 1  # Batch size for critic updates
-actor_batch_size: 8  # Batch size for actor updates
-n_updates: 10000  # Total number of training updates
+n_updates: 10000  # Total number of training updates (one trajectory per update)
 
 # State Space Model (SSM) for preference prediction
-ssm_type: "pf"  # Options: "pf" (particle filter), "ekf" (extended kalman filter), "neural"
+ssm_type: "mamba"  # Options: "pf" (particle filter), "ekf" (extended kalman filter), "mamba"
 
 # Particle Filter settings (used if ssm_type == "pf")
 particle_filter:
   n_particles: 1000
-  process_noise: 0.01
+  process_noise: 0.05
   observation_noise: 0.05
-  initial_noise: 1.0
+  initial_noise: 2.0
 
 # Extended Kalman Filter settings (used if ssm_type == "ekf")
 ekf:
   process_noise: 0.01
   observation_noise: 0.1
-  initial_variance: 0.1
+  initial_noise: 0.1
+  beta: 1.0  # Temperature for margin->probability (higher = sharper distribution)
 
-# Neural SSM settings (used if ssm_type == "neural")
-neural_ssm:
-  hidden_dim: 64
-  n_layers: 2
-  learning_rate: 0.001
+# Mamba SSM settings (use if ssm_type == "mamba")
+mamba:
+  hidden_dim: 128
+  learning_rate: 1.0e-5
 
 # Device
 device: "cuda"
@@ -51,5 +49,6 @@ wandb_project: "MOIQL"
 save_dir: "moiql_results"
 
 # Evaluation
-eval_interval: 1000  # Evaluate every N updates
-eval_episodes: 100  # Number of episodes for evaluation
+eval_interval: 100  # Evaluate every N updates
+early_stopping_patience: 10  # Stop training if no improvement for N evaluations (0 = disabled)
+eval_weights: [0.5, 0.5]  # Weights [w1, w2] for computing eval_score = w1*cross_entropy + w2*preference_mae

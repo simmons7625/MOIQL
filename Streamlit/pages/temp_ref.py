@@ -31,8 +31,8 @@ from src.Env.reward_function import (
     DSTPreferenceFunction,
     HighwayPreferenceFunction,
 )
-from src.IQL.trainer import ODSQILTrainer
-from src.IQL.ssm import StateSpaceModel
+from IQL.simplessm.trainer import ODSQILTrainer
+from IQL.simplessm.ssm import StateSpaceModel
 
 
 st.set_page_config(page_title="IQL Dashboard", layout="wide")
