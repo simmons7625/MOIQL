@@ -149,37 +149,22 @@ class MambaSSM(nn.Module):
         self.num_layers = num_layers
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
 
-        # Action embedding for discrete actions
-        self.action_embed_dim = min(action_dim, 8)  # Embedding dimension
-        self.action_embedding = nn.Embedding(action_dim, self.action_embed_dim)
+        # Shared embedding head for [obs, action_onehot]
+        self.input_dim = obs_dim + action_dim
+        self.embed_head = nn.Linear(self.input_dim, hidden_dim)
 
-        # Input dimension is obs + action_embedding
-        self.input_dim = obs_dim + self.action_embed_dim
-
-        # Build multiple Mamba layers
+        # Build multiple Mamba layers (all take hidden_dim input now)
         self.layers = nn.ModuleList()
         for i in range(num_layers):
             layer_dict = nn.ModuleDict(
                 {
                     "input_proj": nn.Linear(
-                        self.hidden_dim if i > 0 else self.input_dim,
-                        self.hidden_dim,
-                        bias=False,
+                        self.hidden_dim, self.hidden_dim, bias=False
                     ),
-                    "B_proj": nn.Linear(
-                        self.hidden_dim if i > 0 else self.input_dim,
-                        self.hidden_dim,
-                        bias=False,
-                    ),
-                    "C_proj": nn.Linear(
-                        self.hidden_dim if i > 0 else self.input_dim,
-                        self.hidden_dim,
-                        bias=False,
-                    ),
+                    "B_proj": nn.Linear(self.hidden_dim, self.hidden_dim, bias=False),
+                    "C_proj": nn.Linear(self.hidden_dim, self.hidden_dim, bias=False),
                     "delta_proj": nn.Linear(
-                        self.hidden_dim if i > 0 else self.input_dim,
-                        self.hidden_dim,
-                        bias=False,
+                        self.hidden_dim, self.hidden_dim, bias=False
                     ),
                 }
             )
@@ -216,11 +201,16 @@ class MambaSSM(nn.Module):
         """
         T = observations.shape[0]
 
-        # Embed actions: [T] -> [T, action_embed_dim]
-        action_embeds = self.action_embedding(actions)
+        # One-hot encode actions: [T] -> [T, action_dim]
+        action_onehot = torch.nn.functional.one_hot(
+            actions, num_classes=self.action_dim
+        ).float()
 
-        # Concatenate observations and action embeddings: [T, obs_dim + action_embed_dim]
-        x = torch.cat([observations, action_embeds], dim=-1)
+        # Concatenate observations and one-hot actions: [T, obs_dim + action_dim]
+        obs_action = torch.cat([observations, action_onehot], dim=-1)
+
+        # Embed through shared head: [T, input_dim] -> [T, hidden_dim]
+        x = self.embed_head(obs_action)
 
         # Process through each Mamba layer
         for layer_idx in range(self.num_layers):
@@ -390,12 +380,13 @@ class GRUSSM(nn.Module):
         self.action_embed_dim = min(action_dim, 8)  # Embedding dimension
         self.action_embedding = nn.Embedding(action_dim, self.action_embed_dim)
 
-        # Input dimension is obs + action_embedding
-        self.input_dim = obs_dim + self.action_embed_dim
+        # Shared embedding head for [obs, action_embed]
+        self.input_dim = obs_dim + action_dim
+        self.embed_head = nn.Linear(self.input_dim, hidden_dim)
 
-        # GRU layers
+        # GRU layers (takes hidden_dim input from embed_head)
         self.gru = nn.GRU(
-            input_size=self.input_dim,
+            input_size=hidden_dim,
             hidden_size=hidden_dim,
             num_layers=num_layers,
             batch_first=False,  # [T, batch, features]
@@ -425,13 +416,18 @@ class GRUSSM(nn.Module):
             alpha: Dirichlet concentration parameters [T, n_objectives]
                    alpha > 1 for each dimension (via softplus + 1)
         """
-        # Embed actions: [T] -> [T, action_embed_dim]
-        action_embeds = self.action_embedding(actions)
+        # One-hot encode actions: [T] -> [T, action_dim]
+        action_onehot = torch.nn.functional.one_hot(
+            actions, num_classes=self.action_dim
+        ).float()
 
-        # Concatenate observations and action embeddings: [T, obs_dim + action_embed_dim]
-        x = torch.cat([observations, action_embeds], dim=-1)
+        # Concatenate observations and one-hot actions: [T, obs_dim + action_dim]
+        obs_action = torch.cat([observations, action_onehot], dim=-1)
 
-        # Add batch dimension for GRU: [T, input_dim] -> [T, 1, input_dim]
+        # Embed through shared head: [T, input_dim] -> [T, hidden_dim]
+        x = self.embed_head(obs_action)
+
+        # Add batch dimension for GRU: [T, hidden_dim] -> [T, 1, hidden_dim]
         x_batched = x.unsqueeze(1)
 
         # GRU forward pass
