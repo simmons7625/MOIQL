@@ -1,32 +1,6 @@
-"""
-State Space Models for Preference Weight Prediction.
-
-State space formulation:
-    h_t = f(h_{t-1}, x_t) + noise_1,t    (state transition)
-    y_t = g(h_t) + noise_2,t              (observation)
-
-For preference weight estimation:
-    x_t: (s_t, a_t) - state and action
-    h_t: preference weights
-    g: mismatch function
-
-Mismatch function:
-    mismatch = ||preference/|preference| - q_values_all/|q_values_all|||^2
-
-Where:
-    - preference: h_t (preference weights)
-    - q_values_all: expert Q-values from demonstrations
-
-Implements three approaches:
-1. Particle Filter: Non-parametric sequential Monte Carlo
-2. Extended Kalman Filter (EKF): Gaussian approximation with linearization
-3. Neural SSM: GRU-based neural state space model
-"""
-
 import numpy as np
 import torch
 import torch.nn as nn
-from typing import Callable
 
 
 def compute_mismatch(vec1, vec2, eps: float = 1e-8):
@@ -65,181 +39,60 @@ def compute_mismatch(vec1, vec2, eps: float = 1e-8):
     return mismatch
 
 
-def compute_margin_vector(
-    preference: np.ndarray,
-    q_values: np.ndarray,
+def compute_margin(
+    preferences: torch.Tensor,
+    q_values: torch.Tensor,
+    expert_actions: torch.Tensor,
     eps: float = 1e-8,
-) -> np.ndarray:
+) -> torch.Tensor:
     """
-    Compute margin for all actions.
-
-    For each action a, compute: margin_a = -(mismatch(q_a, w) - mean_other_mismatch)
-    Higher margin means the action is more aligned with the preference.
+    Compute margins for batch of timesteps.
 
     Args:
-        preference: Preference weights [n_objectives]
-        q_values: Q-values for all actions [action_dim, n_objectives]
-        eps: Small constant to avoid division by zero
+        preferences: [T, n_objectives]
+        q_values: [T, action_dim, n_objectives]
+        expert_actions: [T]
+        eps: Small constant
 
     Returns:
-        Margin vector [action_dim]
+        margins: [T]
     """
-    # Normalize preference
-    pref_norm = np.linalg.norm(preference) + eps
-    pref_normalized = preference / pref_norm
+    action_dim = q_values.shape[1]
 
-    # Compute mismatch for each action
-    action_dim = q_values.shape[0]
-    mismatches = np.zeros(action_dim)
+    # Normalize preferences: [T, n_objectives]
+    pref_norm = torch.norm(preferences, dim=-1, keepdim=True) + eps
+    pref_normalized = preferences / pref_norm
 
-    for a in range(action_dim):
-        q_val = q_values[a]  # [n_objectives]
-        q_norm = np.linalg.norm(q_val) + eps
-        q_normalized = q_val / q_norm
+    # Normalize Q-values: [T, action_dim, n_objectives]
+    q_norm = torch.norm(q_values, dim=-1, keepdim=True) + eps
+    q_normalized = q_values / q_norm
 
-        # Mismatch = ||w_norm - q_norm||^2
-        mismatch = np.sum((pref_normalized - q_normalized) ** 2)
-        mismatches[a] = mismatch
+    # Compute mismatches for all actions: [T, action_dim]
+    # pref_normalized: [T, 1, n_objectives], q_normalized: [T, action_dim, n_objectives]
+    pref_expanded = pref_normalized.unsqueeze(1)  # [T, 1, n_objectives]
+    mismatches = torch.sum(
+        (pref_expanded - q_normalized) ** 2, dim=-1
+    )  # [T, action_dim]
 
-    # For each action, compute margin relative to others
-    margins = np.zeros(action_dim)
-    for a in range(action_dim):
-        expert_mismatch = mismatches[a]
-        other_mask = np.ones(action_dim, dtype=bool)
-        other_mask[a] = False
-        mean_other_mismatch = np.mean(mismatches[other_mask])
-        margins[a] = -(expert_mismatch - mean_other_mismatch)
+    # Get expert mismatches: [T]
+    expert_mismatches = mismatches.gather(1, expert_actions.unsqueeze(1)).squeeze(1)
+
+    # Compute mean of other mismatches: [T]
+    # Create mask for non-expert actions
+    mask = torch.ones_like(mismatches, dtype=torch.bool)
+    mask.scatter_(1, expert_actions.unsqueeze(1), False)
+
+    # Sum over non-expert actions and divide by (action_dim - 1)
+    other_mismatch_sum = (mismatches * mask).sum(dim=1)
+    mean_other_mismatches = other_mismatch_sum / (action_dim - 1)
+
+    # Compute margins
+    margins = -(expert_mismatches - mean_other_mismatches)
 
     return margins
 
 
-def compute_margin_objective(
-    preference: np.ndarray,
-    q_values: np.ndarray,
-    expert_action: int,
-    eps: float = 1e-8,
-) -> float:
-    """
-    Compute margin objective for a specific expert action.
-
-    This is a convenience wrapper around compute_margin_vector that returns
-    the margin for a single action.
-
-    Args:
-        preference: Preference weights [n_objectives]
-        q_values: Q-values for all actions [action_dim, n_objectives]
-        expert_action: Expert's chosen action index
-        eps: Small constant to avoid division by zero
-
-    Returns:
-        Margin objective value for expert_action (higher is better)
-    """
-    margins = compute_margin_vector(preference, q_values, eps)
-    return margins[expert_action]
-
-
-def softmax_stable(x: np.ndarray, axis: int = -1) -> np.ndarray:
-    """Numerically stable softmax."""
-    xm = x - np.max(x, axis=axis, keepdims=True)
-    e = np.exp(xm)
-    return e / np.sum(e, axis=axis, keepdims=True)
-
-
-def softmax_jacobian(s: np.ndarray) -> np.ndarray:
-    """
-    Compute Jacobian of softmax function.
-
-    Args:
-        s: Softmax output [n]
-
-    Returns:
-        Jacobian matrix [n, n] where J[i,j] = ds_i/dx_j
-    """
-    s = s.reshape(-1, 1)
-    return np.diagflat(s.flatten()) - (s @ s.T)
-
-
-def numeric_jacobian(f: Callable, x: np.ndarray, eps: float = 1e-6) -> np.ndarray:
-    """
-    Compute Jacobian numerically using finite differences.
-
-    Args:
-        f: Function that takes x [n] and returns y [m]
-        x: Input point [n]
-        eps: Finite difference step size
-
-    Returns:
-        Jacobian matrix [m, n] where J[i,j] = dy_i/dx_j
-    """
-    y0 = f(x)
-    m = y0.shape[0] if y0.ndim > 0 else 1
-    n = x.shape[0]
-    J = np.zeros((m, n))
-
-    for j in range(n):
-        x_plus = x.copy()
-        x_plus[j] += eps
-        y_plus = f(x_plus)
-        J[:, j] = (y_plus - y0) / eps
-
-    return J
-
-
-class Mamba(nn.Module):
-    """Simplified Mamba block with selective state-space model."""
-
-    def __init__(self, input_dim, hidden_dim, output_dim):
-        super().__init__()
-        self.input_dim = input_dim
-        self.hidden_dim = hidden_dim
-        self.output_dim = output_dim
-        # Input projection
-        self.input_proj = nn.Linear(self.input_dim, self.hidden_dim, bias=False)
-
-        # Projections for input-dependent parameters (selective mechanism)
-        self.B_proj = nn.Linear(self.input_dim, self.hidden_dim, bias=False)
-        self.C_proj = nn.Linear(self.input_dim, self.hidden_dim, bias=False)
-        self.delta_proj = nn.Linear(self.input_dim, self.hidden_dim, bias=False)
-
-        # SSM parameters
-        self.A_log = nn.Parameter(torch.randn(self.hidden_dim))
-
-        # Output projection
-        self.out_proj = nn.Linear(self.hidden_dim, self.output_dim)
-
-        # Skip connection projection (if input_dim != output_dim)
-        if self.input_dim != self.output_dim:
-            self.skip_proj = nn.Linear(self.input_dim, self.output_dim, bias=False)
-        else:
-            self.skip_proj = None
-
-    def forward(self, x, h=None):
-        batch = x.shape[0]
-        if h is None:
-            h = torch.zeros(batch, self.hidden_dim, device=x.device)
-
-        x_state = self.input_proj(x)
-        B = self.B_proj(x)
-        C = self.C_proj(x)
-        delta = torch.sigmoid(self.delta_proj(x))
-        A = -torch.exp(self.A_log.float())
-
-        A_bar = torch.exp(delta * A)
-        h = A_bar * h + B * x_state
-        y = C * h
-
-        output = self.out_proj(y)
-
-        # Skip connection
-        if self.skip_proj is not None:
-            output = output + self.skip_proj(x)
-        else:
-            output = output + x
-
-        return output, h
-
-
-class MambaSSM:
+class MambaSSM(nn.Module):
     """
     Mamba State Space Model for preference weight prediction.
 
@@ -273,76 +126,79 @@ class MambaSSM:
             learning_rate: Learning rate for optimizer
             device: Device to run on
         """
+        super().__init__()
+
         self.obs_dim = obs_dim
         self.action_dim = action_dim
         self.n_objectives = n_objectives
         self.hidden_dim = hidden_dim
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
 
-        # Build model
-        self.model = self._build_model().to(self.device)
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate)
+        # Input projection
+        self.input_proj = nn.Linear(self.obs_dim, self.hidden_dim, bias=False)
 
-    def _build_model(self) -> nn.Module:
-        """Build Mamba-based neural SSM."""
-        return Mamba(
-            input_dim=self.obs_dim,
-            hidden_dim=self.hidden_dim,
-            output_dim=self.n_objectives,
-        )
+        # Projections for input-dependent parameters (selective mechanism)
+        self.B_proj = nn.Linear(self.obs_dim, self.hidden_dim, bias=False)
+        self.C_proj = nn.Linear(self.obs_dim, self.hidden_dim, bias=False)
+        self.delta_proj = nn.Linear(self.obs_dim, self.hidden_dim, bias=False)
 
-    def _compute_margin_batch(
-        self,
-        preferences: torch.Tensor,
-        q_values: torch.Tensor,
-        expert_actions: torch.Tensor,
-        eps: float = 1e-8,
-    ) -> torch.Tensor:
+        # SSM parameters
+        self.A_log = nn.Parameter(torch.randn(self.hidden_dim))
+
+        # Output projection
+        self.out_proj = nn.Linear(self.hidden_dim, self.n_objectives)
+
+        # Skip connection projection (if obs_dim != n_objectives)
+        if self.obs_dim != self.n_objectives:
+            self.skip_proj = nn.Linear(self.obs_dim, self.n_objectives, bias=False)
+        else:
+            self.skip_proj = None
+
+        # Move to device
+        self.to(self.device)
+
+        # Optimizer
+        self.optimizer = torch.optim.Adam(self.parameters(), lr=learning_rate)
+
+    def forward(self, x):
         """
-        Compute margins for batch of timesteps.
+        Forward pass through Mamba SSM for entire sequence.
 
         Args:
-            preferences: [T, n_objectives]
-            q_values: [T, action_dim, n_objectives]
-            expert_actions: [T]
-            eps: Small constant
+            x: Input sequence [T, obs_dim]
 
         Returns:
-            margins: [T]
+            output: Logits [T, n_objectives]
         """
-        action_dim = q_values.shape[1]
+        # Process entire sequence at once
+        x_state = self.input_proj(x)  # [T, hidden_dim]
+        B = self.B_proj(x)  # [T, hidden_dim]
+        C = self.C_proj(x)  # [T, hidden_dim]
+        delta = torch.sigmoid(self.delta_proj(x))  # [T, hidden_dim]
+        A = -torch.exp(self.A_log.float())  # [hidden_dim]
 
-        # Normalize preferences: [T, n_objectives]
-        pref_norm = torch.norm(preferences, dim=-1, keepdim=True) + eps
-        pref_normalized = preferences / pref_norm
+        # Compute state evolution for entire sequence
+        T = x.shape[0]
+        h = torch.zeros(self.hidden_dim, device=x.device)  # Initial hidden state
+        h_list = []
 
-        # Normalize Q-values: [T, action_dim, n_objectives]
-        q_norm = torch.norm(q_values, dim=-1, keepdim=True) + eps
-        q_normalized = q_values / q_norm
+        for t in range(T):
+            A_bar = torch.exp(delta[t] * A)  # [hidden_dim]
+            h = A_bar * h + B[t] * x_state[t]  # [hidden_dim]
+            h_list.append(h)
 
-        # Compute mismatches for all actions: [T, action_dim]
-        # pref_normalized: [T, 1, n_objectives], q_normalized: [T, action_dim, n_objectives]
-        pref_expanded = pref_normalized.unsqueeze(1)  # [T, 1, n_objectives]
-        mismatches = torch.sum(
-            (pref_expanded - q_normalized) ** 2, dim=-1
-        )  # [T, action_dim]
+        h_seq = torch.stack(h_list)  # [T, hidden_dim]
+        y = C * h_seq  # [T, hidden_dim]
 
-        # Get expert mismatches: [T]
-        expert_mismatches = mismatches.gather(1, expert_actions.unsqueeze(1)).squeeze(1)
+        output = self.out_proj(y)  # [T, n_objectives]
 
-        # Compute mean of other mismatches: [T]
-        # Create mask for non-expert actions
-        mask = torch.ones_like(mismatches, dtype=torch.bool)
-        mask.scatter_(1, expert_actions.unsqueeze(1), False)
+        # Skip connection
+        if self.skip_proj is not None:
+            output = output + self.skip_proj(x)
+        else:
+            output = output + x
 
-        # Sum over non-expert actions and divide by (action_dim - 1)
-        other_mismatch_sum = (mismatches * mask).sum(dim=1)
-        mean_other_mismatches = other_mismatch_sum / (action_dim - 1)
-
-        # Compute margins
-        margins = -(expert_mismatches - mean_other_mismatches)
-
-        return margins
+        return output
 
     def predict_sequence(self, observations: np.ndarray) -> np.ndarray:
         """
@@ -357,17 +213,7 @@ class MambaSSM:
         obs_tensor = torch.FloatTensor(observations).to(self.device)  # [T, obs_dim]
 
         with torch.no_grad():
-            T = obs_tensor.shape[0]
-            h = None
-            logits_list = []
-
-            # Process sequence step by step to maintain hidden state
-            for t in range(T):
-                obs_t = obs_tensor[t : t + 1]  # [1, obs_dim]
-                logits_t, h = self.model(obs_t, h)  # [1, n_objectives]
-                logits_list.append(logits_t)
-
-            logits = torch.cat(logits_list, dim=0)  # [T, n_objectives]
+            logits = self.forward(obs_tensor)  # [T, n_objectives]
             preferences = torch.softmax(logits, dim=-1)  # [T, n_objectives]
 
         return preferences.cpu().numpy()
@@ -395,23 +241,12 @@ class MambaSSM:
             self.device
         )  # [T, action_dim, n_objectives]
 
-        T = obs_tensor.shape[0]
-        h = None
-        logits_list = []
-
-        # Forward pass through sequence
-        for t in range(T):
-            obs_t = obs_tensor[t : t + 1]  # [1, obs_dim]
-            logits_t, h = self.model(obs_t, h)  # [1, n_objectives]
-            logits_list.append(logits_t)
-
-        logits = torch.cat(logits_list, dim=0)  # [T, n_objectives]
+        # Forward pass through entire sequence
+        logits = self.forward(obs_tensor)  # [T, n_objectives]
         preferences = torch.softmax(logits, dim=-1)  # [T, n_objectives]
 
         # Compute margin-based loss
-        margins = self._compute_margin_batch(
-            preferences, q_values_tensor, actions_tensor
-        )  # [T]
+        margins = compute_margin(preferences, q_values_tensor, actions_tensor)  # [T]
 
         # Loss is negative margin (we want to maximize margin)
         loss = -margins.mean()

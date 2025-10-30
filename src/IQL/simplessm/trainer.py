@@ -227,7 +227,7 @@ class SSMIQTrainer:
 
         # Initial state info for v_init computation
         initial_state = traj_states[0]
-        initial_preference = traj_prefs[0]
+        initial_preference = self.ssm.predict(initial_state, None)
 
         losses = []
         ssm_losses = []

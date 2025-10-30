@@ -232,14 +232,12 @@ class NeuralSSMIQTrainer:
             q_values_all_np = q_values_all_traj.cpu().numpy()
 
         # Train SSM on full trajectory sequence
-        ssm_loss = self.ssm.train_trajectory(
+        ssm_loss = self.ssm.train(
             observations=traj_states, actions=traj_actions, q_values_all=q_values_all_np
         )
 
         # Predict preferences for entire trajectory
-        predicted_preferences = self.ssm.predict_sequence(
-            traj_states
-        )  # [T, n_objectives]
+        predicted_preferences = self.ssm.predict(traj_states)  # [T, n_objectives]
 
         # Compute preference MAE
         preference_errors = np.abs(predicted_preferences[:, 0] - traj_prefs[:, 0])
@@ -296,9 +294,6 @@ class NeuralSSMIQTrainer:
         self.q_optimizer.step()
         self._soft_update()
 
-        # Update SSM
-        self.ssm.step(ssm_loss)
-
         metrics = {
             "loss": mean_loss.item(),
             "preference_mae": preference_mae,
@@ -327,7 +322,7 @@ class NeuralSSMIQTrainer:
             ssm_path = save_path.parent / f"{save_path.stem}_ssm.pt"
             torch.save(
                 {
-                    "model_state_dict": self.ssm.model.state_dict(),
+                    "model_state_dict": self.ssm.state_dict(),
                     "optimizer_state_dict": self.ssm.optimizer.state_dict(),
                 },
                 ssm_path,
@@ -351,7 +346,7 @@ class NeuralSSMIQTrainer:
                 ssm_checkpoint = torch.load(
                     ssm_path, map_location=self.ssm.device, weights_only=True
                 )
-                self.ssm.model.load_state_dict(ssm_checkpoint["model_state_dict"])
+                self.ssm.load_state_dict(ssm_checkpoint["model_state_dict"])
                 self.ssm.optimizer.load_state_dict(
                     ssm_checkpoint["optimizer_state_dict"]
                 )
@@ -406,7 +401,7 @@ class NeuralSSMIQTrainer:
             traj_prefs = np.array(traj["preference_weights"])
 
             # Sequence-wise prediction
-            predicted_prefs = self.ssm.predict_sequence(traj_states)
+            predicted_prefs = self.ssm.predict(traj_states)
 
             traj_predictions = []
             traj_cross_entropies = []
