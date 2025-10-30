@@ -99,8 +99,12 @@ class MambaSSM(nn.Module):
     Architecture:
     - Input: full trajectory sequences
     - Selective state-space mechanism with input-dependent parameters
-    - Output: logits -> softmax -> preference weights (ensures simplex constraint)
+    - Output: Dirichlet distribution parameters (alpha > 1)
+    - Prediction: Mean of Dirichlet = alpha / sum(alpha)
     - Training: sequence-wise (no step-by-step update needed)
+
+    The Dirichlet output naturally captures uncertainty over preference weights
+    on the simplex, where higher alpha values indicate more concentrated beliefs.
 
     Note: Does not inherit from StateSpaceModel as it uses sequence-wise processing
     rather than step-by-step predict/update interface.
@@ -197,7 +201,8 @@ class MambaSSM(nn.Module):
             x: Input sequence [T, obs_dim] or [T, hidden_dim]
 
         Returns:
-            output: Logits [T, n_objectives]
+            alpha: Dirichlet concentration parameters [T, n_objectives]
+                   alpha > 1 for each dimension (via softplus + 1)
         """
         T = x.shape[0]
         skip_input = x  # Save for skip connection
@@ -239,23 +244,31 @@ class MambaSSM(nn.Module):
             if skip_input.shape[-1] == output.shape[-1]:
                 output = output + skip_input
 
-        return output
+        # Convert to Dirichlet concentration parameters (alpha > 0)
+        # Use softplus + 1 to ensure alpha >= 1 (concentrated distribution)
+        alpha = torch.nn.functional.softplus(output) + 1.0
+
+        return alpha
 
     def predict(self, observations: np.ndarray) -> np.ndarray:
         """
         Predict preferences for entire trajectory sequence.
 
+        Uses the mean of the Dirichlet distribution: E[p] = alpha / sum(alpha)
+
         Args:
             observations: [T, obs_dim] - full trajectory observations
 
         Returns:
-            preferences: [T, n_objectives] - predictions for all timesteps
+            preferences: [T, n_objectives] - mean predictions for all timesteps
         """
         obs_tensor = torch.FloatTensor(observations).to(self.device)  # [T, obs_dim]
 
         with torch.no_grad():
-            logits = self.forward(obs_tensor)  # [T, n_objectives]
-            preferences = torch.softmax(logits, dim=-1)  # [T, n_objectives]
+            alpha = self.forward(obs_tensor)  # [T, n_objectives]
+            # Mean of Dirichlet: alpha / sum(alpha)
+            alpha_sum = alpha.sum(dim=-1, keepdim=True)
+            preferences = alpha / alpha_sum  # [T, n_objectives]
 
         return preferences.cpu().numpy()
 
@@ -299,8 +312,11 @@ class MambaSSM(nn.Module):
         )  # [T, action_dim, n_objectives]
 
         # Forward pass through entire sequence
-        logits = self.forward(obs_tensor)  # [T, n_objectives]
-        preferences = torch.softmax(logits, dim=-1)  # [T, n_objectives]
+        alpha = self.forward(obs_tensor)  # [T, n_objectives]
+
+        # Mean of Dirichlet: alpha / sum(alpha)
+        alpha_sum = alpha.sum(dim=-1, keepdim=True)
+        preferences = alpha / alpha_sum  # [T, n_objectives]
 
         # Compute margin-based loss
         margins = compute_margin(preferences, q_values_tensor, actions_tensor)  # [T]
@@ -322,8 +338,12 @@ class GRUSSM(nn.Module):
     Architecture:
     - Input: full trajectory sequences
     - Standard GRU layers for sequence processing
-    - Output: logits -> softmax -> preference weights (ensures simplex constraint)
+    - Output: Dirichlet distribution parameters (alpha > 1)
+    - Prediction: Mean of Dirichlet = alpha / sum(alpha)
     - Training: sequence-wise (no step-by-step update needed)
+
+    The Dirichlet output naturally captures uncertainty over preference weights
+    on the simplex, where higher alpha values indicate more concentrated beliefs.
     """
 
     def __init__(
@@ -391,7 +411,8 @@ class GRUSSM(nn.Module):
             x: Input sequence [T, obs_dim]
 
         Returns:
-            output: Logits [T, n_objectives]
+            alpha: Dirichlet concentration parameters [T, n_objectives]
+                   alpha > 1 for each dimension (via softplus + 1)
         """
         skip_input = x  # Save for skip connection
 
@@ -415,23 +436,31 @@ class GRUSSM(nn.Module):
             if skip_input.shape[-1] == output.shape[-1]:
                 output = output + skip_input
 
-        return output
+        # Convert to Dirichlet concentration parameters (alpha > 0)
+        # Use softplus + 1 to ensure alpha >= 1 (concentrated distribution)
+        alpha = torch.nn.functional.softplus(output) + 1.0
+
+        return alpha
 
     def predict(self, observations: np.ndarray) -> np.ndarray:
         """
         Predict preferences for entire trajectory sequence.
 
+        Uses the mean of the Dirichlet distribution: E[p] = alpha / sum(alpha)
+
         Args:
             observations: [T, obs_dim] - full trajectory observations
 
         Returns:
-            preferences: [T, n_objectives] - predictions for all timesteps
+            preferences: [T, n_objectives] - mean predictions for all timesteps
         """
         obs_tensor = torch.FloatTensor(observations).to(self.device)  # [T, obs_dim]
 
         with torch.no_grad():
-            logits = self.forward(obs_tensor)  # [T, n_objectives]
-            preferences = torch.softmax(logits, dim=-1)  # [T, n_objectives]
+            alpha = self.forward(obs_tensor)  # [T, n_objectives]
+            # Mean of Dirichlet: alpha / sum(alpha)
+            alpha_sum = alpha.sum(dim=-1, keepdim=True)
+            preferences = alpha / alpha_sum  # [T, n_objectives]
 
         return preferences.cpu().numpy()
 
@@ -480,8 +509,11 @@ class GRUSSM(nn.Module):
         )  # [T, action_dim, n_objectives]
 
         # Forward pass through entire sequence
-        logits = self.forward(obs_tensor)  # [T, n_objectives]
-        preferences = torch.softmax(logits, dim=-1)  # [T, n_objectives]
+        alpha = self.forward(obs_tensor)  # [T, n_objectives]
+
+        # Mean of Dirichlet: alpha / sum(alpha)
+        alpha_sum = alpha.sum(dim=-1, keepdim=True)
+        preferences = alpha / alpha_sum  # [T, n_objectives]
 
         # Compute margin-based loss
         margins = compute_margin(preferences, q_values_tensor, actions_tensor)  # [T]

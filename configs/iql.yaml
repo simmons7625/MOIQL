@@ -12,7 +12,7 @@ hidden_dim: 256
 # IQL-specific hyperparameters
 lr: 1.0e-5  # Learning rate
 gamma: 0.99  # Discount factor
-mismatch_coef: 10.0  # Coefficient for mismatch regularization term (0 = disabled, SSM handles preference learning)
+mismatch_coef: 50.0  # Coefficient for mismatch regularization term (0 = disabled, SSM handles preference learning)
 tau: 0.005  # Expectile parameter for value function update
 
 # Training settings
