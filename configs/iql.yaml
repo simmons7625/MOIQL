@@ -37,15 +37,15 @@ ekf:
 
 # Mamba SSM settings (used if ssm_type == "mamba")
 mamba:
-  hidden_dim: 128
+  hidden_dim: 256
   num_layers: 2
-  learning_rate: 1.0e-5
+  learning_rate: 5.0e-4
 
 # GRU SSM settings (used if ssm_type == "gru")
 gru:
-  hidden_dim: 128
+  hidden_dim: 256
   num_layers: 2
-  learning_rate: 1.0e-4
+  learning_rate: 5.0e-4
 
 # Device
 device: "cuda"

@@ -48,6 +48,12 @@ def compute_margin(
     """
     Compute margins for batch of timesteps.
 
+    The margin measures how well preferences align with expert actions vs. other actions.
+    Larger positive margins are better:
+    - margin = mean_other_mismatches - expert_mismatches
+    - Positive: expert Q-values are more aligned with preferences than other actions
+    - Negative: expert Q-values are less aligned (BAD)
+
     Args:
         preferences: [T, n_objectives]
         q_values: [T, action_dim, n_objectives]
@@ -55,7 +61,7 @@ def compute_margin(
         eps: Small constant
 
     Returns:
-        margins: [T]
+        margins: [T] - positive values indicate good alignment
     """
     action_dim = q_values.shape[1]
 
@@ -86,8 +92,11 @@ def compute_margin(
     other_mismatch_sum = (mismatches * mask).sum(dim=1)
     mean_other_mismatches = other_mismatch_sum / (action_dim - 1)
 
-    # Compute margins
-    margins = -(expert_mismatches - mean_other_mismatches)
+    # Compute margins: we want expert actions to have LOW mismatch
+    # and other actions to have HIGH mismatch
+    # margin = mean_other_mismatches - expert_mismatches
+    # Positive margin = good (expert more aligned than others)
+    margins = mean_other_mismatches - expert_mismatches
 
     return margins
 
