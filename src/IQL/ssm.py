@@ -73,8 +73,11 @@ def compute_margin_vector(
     """
     Compute margin for all actions.
 
-    For each action a, compute: margin_a = -(mismatch(q_a, w) - mean_other_mismatch)
-    Higher margin means the action is more aligned with the preference.
+    For each action a, compute: margin_a = max_other_mismatch - mismatch(q_a, w)
+    Higher margin means the action is more aligned with the preference than the best alternative.
+
+    This uses max instead of mean to enforce a stricter criterion: each action
+    is compared against the BEST competing action, not the average.
 
     Args:
         preference: Preference weights [n_objectives]
@@ -101,14 +104,14 @@ def compute_margin_vector(
         mismatch = np.sum((pref_normalized - q_normalized) ** 2)
         mismatches[a] = mismatch
 
-    # For each action, compute margin relative to others
+    # For each action, compute margin relative to best alternative
     margins = np.zeros(action_dim)
     for a in range(action_dim):
-        expert_mismatch = mismatches[a]
+        action_mismatch = mismatches[a]
         other_mask = np.ones(action_dim, dtype=bool)
         other_mask[a] = False
-        mean_other_mismatch = np.mean(mismatches[other_mask])
-        margins[a] = -(expert_mismatch - mean_other_mismatch)
+        max_other_mismatch = np.max(mismatches[other_mask])
+        margins[a] = max_other_mismatch - action_mismatch
 
     return margins
 
@@ -147,8 +150,11 @@ def compute_margin(
     """
     Compute margin for expert actions (PyTorch version for gradient computation).
 
-    Margin = mean_other_mismatch - expert_mismatch
-    Higher margin means expert action is more aligned with preference than others.
+    Margin = max_other_mismatch - expert_mismatch
+    Higher margin means expert action is more aligned with preference than the best alternative.
+
+    This uses max instead of mean to enforce a stricter criterion: the expert action
+    must be better than the BEST competing action, not just better than average.
 
     Args:
         preference_weights: Preference weights [batch, n_objectives]
@@ -184,19 +190,21 @@ def compute_margin(
     actions_idx = actions.long().unsqueeze(-1)  # [batch, 1]
     expert_mismatch = torch.gather(mismatches, 1, actions_idx).squeeze(-1)  # [batch]
 
-    # Compute mean of other mismatches (excluding expert action)
+    # Compute max of other mismatches (excluding expert action)
     # Create mask for other actions
     batch_indices = torch.arange(batch_size, device=q_values_all.device)
     mask = torch.ones_like(mismatches, dtype=torch.bool)  # [batch, action_dim]
     mask[batch_indices, actions.long()] = False
 
-    # Sum other mismatches and divide by (action_dim - 1)
-    other_mismatches_sum = torch.sum(mismatches * mask.float(), dim=1)  # [batch]
-    mean_other_mismatch = other_mismatches_sum / (action_dim - 1)  # [batch]
+    # Get maximum mismatch among other actions
+    # Set expert action mismatch to -inf so it's not selected
+    masked_mismatches = mismatches.clone()
+    masked_mismatches[~mask] = float("-inf")
+    max_other_mismatch = torch.max(masked_mismatches, dim=1)[0]  # [batch]
 
-    # Margin = mean_other_mismatch - expert_mismatch
-    # Positive margin means expert action has lower mismatch (better alignment)
-    margins = mean_other_mismatch - expert_mismatch  # [batch]
+    # Margin = max_other_mismatch - expert_mismatch
+    # Positive margin means expert action has lower mismatch than the best alternative
+    margins = max_other_mismatch - expert_mismatch  # [batch]
 
     return margins
 

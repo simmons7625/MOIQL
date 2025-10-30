@@ -110,10 +110,11 @@ class SSMIQTrainer:
         Compute Soft IQ loss with margin regularization.
 
         Loss = Soft IQ loss - mismatch_coef * margin
-        where margin = mean_other_mismatch - expert_mismatch
+        where margin = max_other_mismatch - expert_mismatch
 
         This encourages the Q-network to maximize the margin between expert
-        and non-expert actions based on preference alignment.
+        action and the BEST competing action based on preference alignment.
+        Using max (instead of mean) enforces a stricter criterion.
 
         Args:
             states: [batch, obs_dim]
@@ -194,8 +195,8 @@ class SSMIQTrainer:
         ).mean()
 
         # ===== Margin Regularization =====
-        # Maximize margin: mean_other_mismatch - expert_mismatch
-        # Higher margin means expert action is more aligned with preference than others
+        # Maximize margin: max_other_mismatch - expert_mismatch
+        # Higher margin means expert action is better aligned than the BEST alternative
         # We want to MAXIMIZE margin, so loss = -margin
         margins = compute_margin(preference_weights, q_all_actions, actions)  # [batch]
         margin_loss = -margins.mean()  # Negative because we want to maximize margin

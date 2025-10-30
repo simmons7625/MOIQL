@@ -11,8 +11,8 @@ iql:
   hidden_dim: 256  # Network hidden dimension
   lr: 1.0e-5  # Learning rate for Q-network
   gamma: 0.995  # Discount factor
-  tau: 0.005  # Soft update coefficient for target network
-  mismatch_coef: 30.0  # Coefficient for mismatch regularization term (0 = disabled, SSM handles preference learning)
+  tau: 0.01  # Soft update coefficient for target network
+  mismatch_coef: 1.0  # Coefficient for mismatch regularization term (0 = disabled, SSM handles preference learning)
   n_updates: 10000  # Total number of training updates (one trajectory per update)
 
 # State Space Model (SSM) for preference prediction
