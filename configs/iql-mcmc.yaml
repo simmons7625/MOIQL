@@ -4,7 +4,7 @@
 trajectories_path: "simulation_rl/dst_from_1_decay_1e-2/trajectories.json"
 
 # SSM type
-ssm_type: "pf"  # pf, kf, ekf
+ssm_type: "kf"  # pf, kf, ekf
 
 # Training hyperparameters
 num_updates: 10000  # Total number of training updates

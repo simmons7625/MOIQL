@@ -1,298 +1,355 @@
 """
-IQL Training with MCMC-based SSM Hyperparameter Tuning.
+Training script for Objective-Dimensional Soft Inverse Q-Learning (OD-SQIL) with MCMC SSM.
 
-Integrates batch Bayesian auto-tuning into the IQL training loop:
-1. Adjust SSM hyperparameters using MCMC on all trajectories
-2. Train Q-network with current SSM
-3. Repeat for num_updates iterations
-
-This allows the SSM to adapt to the improving Q-network during training.
+This script:
+1. Reads configuration from configs/iql-mcmc.yaml
+2. Loads expert trajectories from the reference directory
+3. Trains the IQL agent with MCMC-tuned SSM preference prediction
+4. At each MCMC interval, adjusts Q_t and R_t noise parameters per-timestep using MCMC
+5. Saves results and models
 """
 
 import argparse
 import json
-import numpy as np
-import torch
-from pathlib import Path
-from typing import Dict, List
-from tqdm import tqdm
-import yaml
+import warnings
 from datetime import datetime
+from pathlib import Path
+from typing import Dict, Any
 
-from .ssm import ParticleFilter, KalmanFilter, ExtendedKalmanFilter
-from .trainer import SSMIQTrainer
+import numpy as np
+import wandb
+import yaml
+from tqdm import tqdm
+
+from src.IQL.trainer import SSMIQTrainer
+from src.IQL.ssm import (
+    ParticleFilter,
+    ExtendedKalmanFilter,
+    KalmanFilter,
+    StateSpaceModel,
+)
+from src.IQL.mcmc_ssm import BatchSSM
+
+# Common evaluation function
+
+# Suppress warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="pygame.pkgdata")
+warnings.filterwarnings("ignore", category=UserWarning, module="gymnasium.spaces.box")
+warnings.filterwarnings("ignore", category=RuntimeWarning, message="divide by zero")
 
 
-def load_trajectories(trajectories_path: str) -> List[Dict]:
-    """Load trajectories from JSON file."""
-    with open(trajectories_path, "r") as f:
+def load_config(config_path: str) -> Dict[str, Any]:
+    """Load configuration from YAML file."""
+    with open(config_path, "r") as f:
+        config = yaml.safe_load(f)
+    return config
+
+
+def infer_env_name(train_dir: str) -> str:
+    """
+    Infer environment name from train_dir path.
+
+    Args:
+        train_dir: Path like "dst_train/20251026_200603" or "highway_train/20251026_200603"
+
+    Returns:
+        Environment name: "deep_sea_treasure" or "mo-highway"
+    """
+    train_dir_lower = train_dir.lower()
+    if (
+        "dst" in train_dir_lower
+        or "deep" in train_dir_lower
+        or "treasure" in train_dir_lower
+    ):
+        return "deep_sea_treasure"
+    elif "highway" in train_dir_lower:
+        return "mo-highway"
+    else:
+        raise ValueError(
+            f"Cannot infer environment from train_dir: {train_dir}. "
+            "Expected 'dst_train' or 'highway_train' in path."
+        )
+
+
+def load_expert_config(expert_dir: str) -> Dict[str, Any]:
+    """Load configuration from expert directory."""
+    expert_path = Path(expert_dir)
+    sim_config_path = expert_path / "config.yaml"
+
+    if not sim_config_path.exists():
+        raise FileNotFoundError(f"Expert config not found at {sim_config_path}")
+
+    # Load simulation config to get train_dir
+    with open(sim_config_path, "r") as f:
+        sim_config = yaml.safe_load(f)
+
+    # Load actual training config from train_dir
+    train_dir = sim_config.get("train_dir")
+    if not train_dir:
+        raise ValueError(f"No train_dir found in {sim_config_path}")
+
+    train_config_path = Path(train_dir) / "config.yaml"
+    if not train_config_path.exists():
+        raise FileNotFoundError(f"Training config not found at {train_config_path}")
+
+    with open(train_config_path, "r") as f:
+        training_config = yaml.safe_load(f)
+
+    # Infer and add env_name to config
+    env_name = infer_env_name(train_dir)
+    training_config["env_name"] = env_name
+
+    return training_config
+
+
+def load_expert_trajectories(expert_dir: str, n_trajectories: int = None) -> list:
+    """
+    Load expert trajectories in raw format (list of trajectories).
+
+    Args:
+        expert_dir: Directory containing trajectories.json
+        n_trajectories: Number of trajectories to load (None = load all)
+
+    Returns:
+        List of trajectory dictionaries
+    """
+    expert_path = Path(expert_dir)
+    traj_path = expert_path / "trajectories.json"
+
+    if not traj_path.exists():
+        raise FileNotFoundError(f"Trajectories not found at {traj_path}")
+
+    print(f"Loading expert trajectories from {traj_path}")
+    with open(traj_path, "r") as f:
         trajectories = json.load(f)
 
-    # Convert lists back to numpy arrays
-    for traj in trajectories:
-        traj["observations"] = np.array(traj["observations"])
-        traj["actions"] = np.array(traj["actions"])
-        traj["mo_rewards"] = np.array(traj["mo_rewards"])
-        traj["preference_weights"] = np.array(traj["preference_weights"])
+    # Sample trajectories if requested
+    if n_trajectories is not None and n_trajectories < len(trajectories):
+        indices = np.random.choice(len(trajectories), n_trajectories, replace=False)
+        trajectories = [trajectories[i] for i in indices]
+        print(f"Sampled {n_trajectories} trajectories from total")
 
+    print(f"Loaded {len(trajectories)} trajectories")
     return trajectories
 
 
 def create_ssm(
-    ssm_type: str,
-    n_objectives: int,
-    process_noise: float,
-    observation_noise: float,
-    initial_variance: float = 0.1,
-    n_particles: int = 1000,
-    beta: float = 5.0,
-    seed: int = 42,
-):
-    """Create SSM model with given hyperparameters."""
-    if ssm_type == "pf":
-        return ParticleFilter(
-            n_objectives=n_objectives,
-            n_particles=n_particles,
-            process_noise=process_noise,
-            observation_noise=observation_noise,
-            seed=seed,
-        )
-    elif ssm_type == "kf":
-        return KalmanFilter(
-            n_objectives=n_objectives,
-            process_noise=process_noise,
-            observation_noise=observation_noise,
-            initial_variance=initial_variance,
-            seed=seed,
-        )
-    elif ssm_type == "ekf":
-        return ExtendedKalmanFilter(
-            n_objectives=n_objectives,
-            process_noise=process_noise,
-            observation_noise=observation_noise,
-            initial_variance=initial_variance,
-            beta=beta,
-            seed=seed,
-        )
-    else:
-        raise ValueError(f"Unknown SSM type: {ssm_type}")
+    config: Dict[str, Any], n_objectives: int, obs_dim: int, action_dim: int
+) -> StateSpaceModel:
+    """Create State Space Model for preference prediction (single SSM, not batch)."""
+    ssm_type = config.get("ssm_type", "pf")
 
-
-def mcmc_update_ssm_params(
-    ssm_type: str,
-    current_params: Dict[str, float],
-    trajectories: List[Dict],
-    trainer: SSMIQTrainer,
-    n_iterations: int = 50,
-    proposal_scale: float = 0.1,
-    device: str = "cuda",
-    seed: int = 42,
-) -> Dict[str, float]:
-    """
-    Single MCMC update step for SSM hyperparameters.
-
-    Uses all trajectories to evaluate the current Q-network + SSM combination.
-
-    Args:
-        current_params: Current SSM hyperparameters
-        trajectories: All training trajectories
-        trainer: IQL trainer with current Q-network
-        n_iterations: Number of MCMC iterations for this update
-        proposal_scale: Scale of random walk proposals
-        device: Device for computation
-        seed: Random seed
-
-    Returns:
-        Updated SSM parameters
-    """
-    rng = np.random.RandomState(seed)
-
-    # Define prior ranges
-    process_noise_range = (1e-4, 0.5)
-    observation_noise_range = (1e-3, 1.0)
-    initial_variance_range = (1e-3, 1.0)
-
-    # Evaluate current parameters
-    current_log_likelihood = evaluate_params_on_trajectories(
-        ssm_type, current_params, trajectories, trainer, device
-    )
-
-    best_params = current_params.copy()
-    best_log_likelihood = current_log_likelihood
-    accepted = 0
-
-    for iteration in range(n_iterations):
-        # Propose new parameters in log space
-        proposed_params_log = {
-            k: np.log(current_params[k]) + rng.normal(0, proposal_scale)
-            for k in current_params.keys()
-        }
-
-        # Clip to prior ranges
-        proposed_params_log["process_noise"] = np.clip(
-            proposed_params_log["process_noise"],
-            np.log(process_noise_range[0]),
-            np.log(process_noise_range[1]),
-        )
-        proposed_params_log["observation_noise"] = np.clip(
-            proposed_params_log["observation_noise"],
-            np.log(observation_noise_range[0]),
-            np.log(observation_noise_range[1]),
-        )
-        proposed_params_log["initial_variance"] = np.clip(
-            proposed_params_log["initial_variance"],
-            np.log(initial_variance_range[0]),
-            np.log(initial_variance_range[1]),
-        )
-
-        # Convert to actual values
-        proposed_params = {k: np.exp(v) for k, v in proposed_params_log.items()}
-
-        # Evaluate proposed parameters
-        proposed_log_likelihood = evaluate_params_on_trajectories(
-            ssm_type, proposed_params, trajectories, trainer, device
-        )
-
-        # Metropolis-Hastings acceptance
-        log_acceptance_ratio = proposed_log_likelihood - current_log_likelihood
-
-        if np.log(rng.rand()) < log_acceptance_ratio:
-            current_params = proposed_params.copy()
-            current_log_likelihood = proposed_log_likelihood
-            accepted += 1
-
-            if current_log_likelihood > best_log_likelihood:
-                best_log_likelihood = current_log_likelihood
-                best_params = current_params.copy()
-
-    acceptance_rate = accepted / n_iterations
-
-    return best_params, acceptance_rate
-
-
-def evaluate_params_on_trajectories(
-    ssm_type: str,
-    params: Dict[str, float],
-    trajectories: List[Dict],
-    trainer: SSMIQTrainer,
-    device: str,
-) -> float:
-    """
-    Evaluate SSM parameters by running trajectories through current Q-network + SSM.
-
-    Returns negative MAE as log-likelihood proxy.
-    """
-    # Create temporary SSM with these parameters
-    temp_ssm = create_ssm(
-        ssm_type=ssm_type,
-        n_objectives=trainer.n_objectives,
-        process_noise=params["process_noise"],
-        observation_noise=params["observation_noise"],
-        initial_variance=params["initial_variance"],
-    )
-
-    total_mae = []
-
-    for traj in trajectories:
-        observations = traj["observations"]
-        actions = traj["actions"]
-        true_preferences = traj["preference_weights"]
-
-        # Reset SSM
-        temp_ssm.reset()
-
-        for t in range(len(observations) - 1):
-            obs = observations[t]
-            action = actions[t]
-            true_pref = true_preferences[t]
-
-            # Get Q-values from current Q-network
-            obs_tensor = torch.FloatTensor(obs.flatten()).unsqueeze(0).to(device)
-            with torch.no_grad():
-                _, q_values = trainer.q_network.act(obs_tensor)
-                q_values_all = q_values.squeeze(0).cpu().numpy()
-
-            # Predict with SSM
-            predicted_pref = temp_ssm.predict(obs, None)
-
-            # Compute MAE
-            mae = np.mean(np.abs(predicted_pref - true_pref))
-            total_mae.append(mae)
-
-            # Update SSM
-            temp_ssm.update(obs, action, q_values_all)
-
-    mean_mae = np.mean(total_mae)
-    return -mean_mae  # Negative MAE as log-likelihood
-
-
-def train_iql_with_mcmc(config: dict):
-    """
-    Train IQL with MCMC-based SSM hyperparameter tuning.
-
-    Training loop:
-    1. MCMC update: Adjust SSM hyperparameters using all trajectories
-    2. Q-network update: Train Q-network on batch from trajectories
-    3. Repeat for num_updates iterations
-    """
-    # Load configuration
-    trajectories_path = config["trajectories_path"]
-    ssm_type = config["ssm_type"]
-    output_dir = config["output_dir"]
-
-    # Training hyperparameters
-    num_updates = config.get("num_updates", 10000)
-    batch_size = config.get("batch_size", 256)
-    mcmc_interval = config.get("mcmc_interval", 100)  # Run MCMC every N updates
-    mcmc_iterations_per_update = config.get("mcmc_iterations_per_update", 20)
-
-    # SSM hyperparameters (initial values)
-    ssm_params = {
-        "process_noise": config.get("initial_process_noise", 0.01),
-        "observation_noise": config.get("initial_observation_noise", 0.1),
-        "initial_variance": config.get("initial_initial_variance", 0.1),
+    # Map short names to full names for backward compatibility
+    type_mapping = {
+        "pf": "particle_filter",
+        "particle_filter": "particle_filter",
+        "kf": "kalman_filter",
+        "kalman_filter": "kalman_filter",
+        "ekf": "extended_kalman_filter",
+        "extended_kalman_filter": "extended_kalman_filter",
     }
 
-    # Model parameters
-    n_objectives = config.get("n_objectives", 2)
-    hidden_dim = config.get("hidden_dim", 256)
-    lr = config.get("lr", 3e-4)
-    gamma = config.get("gamma", 0.99)
-    tau = config.get("tau", 0.005)
-    mismatch_coef = config.get("mismatch_coef", 1.0)
+    if ssm_type not in type_mapping:
+        raise ValueError(f"Unsupported SSM type: {ssm_type}. Options: pf, kf, ekf")
 
-    n_particles = config.get("n_particles", 1000)
-    beta = config.get("beta", 5.0)
-    device = config.get("device", "cuda")
-    seed = config.get("seed", 42)
+    full_type = type_mapping[ssm_type]
 
-    # Load trajectories
-    print(f"Loading trajectories from {trajectories_path}")
-    trajectories = load_trajectories(trajectories_path)
-    print(f"Loaded {len(trajectories)} trajectories")
+    if full_type == "particle_filter":
+        pf_config = config.get("particle_filter", {})
+        ssm = ParticleFilter(
+            n_objectives=n_objectives,
+            n_particles=pf_config.get("n_particles", 1000),
+            process_noise=pf_config.get("process_noise", 0.01),
+            observation_noise=pf_config.get("observation_noise", 0.1),
+        )
+    elif full_type == "kalman_filter":
+        kf_config = config.get("kf", {})
+        ssm = KalmanFilter(
+            n_objectives=n_objectives,
+            process_noise=kf_config.get("process_noise", 0.01),
+            observation_noise=kf_config.get("observation_noise", 0.1),
+            initial_variance=kf_config.get("initial_variance", 0.1),
+        )
+    elif full_type == "extended_kalman_filter":
+        ekf_config = config.get("ekf", {})
+        ssm = ExtendedKalmanFilter(
+            n_objectives=n_objectives,
+            process_noise=ekf_config.get("process_noise", 0.01),
+            observation_noise=ekf_config.get("observation_noise", 0.1),
+            initial_variance=ekf_config.get("initial_variance", 0.1),
+            beta=ekf_config.get("beta", 5.0),
+        )
+    else:
+        raise ValueError(f"SSM type '{full_type}' not yet implemented")
 
-    # Infer dimensions from first trajectory
-    sample_obs = trajectories[0]["observations"][0]
-    sample_actions = trajectories[0]["actions"]
+    return ssm
 
-    obs_dim = sample_obs.flatten().shape[0]
-    action_dim = int(np.max(sample_actions) + 1)
 
-    print(
-        f"Inferred dimensions: obs_dim={obs_dim}, action_dim={action_dim}, n_objectives={n_objectives}"
+def create_batch_ssm(
+    config: Dict[str, Any], n_objectives: int, n_trajectories: int
+) -> BatchSSM:
+    """Create Batch SSM for MCMC-based preference prediction."""
+    ssm_type = config.get("ssm_type", "pf")
+
+    # Map short names to full names for backward compatibility
+    type_mapping = {
+        "pf": "particle_filter",
+        "particle_filter": "particle_filter",
+        "kf": "kalman_filter",
+        "kalman_filter": "kalman_filter",
+        "ekf": "extended_kalman_filter",
+        "extended_kalman_filter": "extended_kalman_filter",
+    }
+
+    if ssm_type not in type_mapping:
+        raise ValueError(f"Unsupported SSM type: {ssm_type}. Options: pf, kf, ekf")
+
+    full_type = type_mapping[ssm_type]
+
+    if full_type == "particle_filter":
+        pf_config = config.get("particle_filter", {})
+        batch_ssm = BatchSSM(
+            ssm_type=full_type,
+            n_objectives=n_objectives,
+            n_trajectories=n_trajectories,
+            initial_process_noise=pf_config.get("process_noise", 0.01),
+            initial_observation_noise=pf_config.get("observation_noise", 0.1),
+            initial_variance=0.1,
+            n_particles=pf_config.get("n_particles", 1000),
+            seed=config.get("seed", 42),
+        )
+    elif full_type == "kalman_filter":
+        kf_config = config.get("kf", {})
+        batch_ssm = BatchSSM(
+            ssm_type=full_type,
+            n_objectives=n_objectives,
+            n_trajectories=n_trajectories,
+            initial_process_noise=kf_config.get("process_noise", 0.01),
+            initial_observation_noise=kf_config.get("observation_noise", 0.1),
+            initial_variance=kf_config.get("initial_variance", 0.1),
+            seed=config.get("seed", 42),
+        )
+    elif full_type == "extended_kalman_filter":
+        ekf_config = config.get("ekf", {})
+        batch_ssm = BatchSSM(
+            ssm_type=full_type,
+            n_objectives=n_objectives,
+            n_trajectories=n_trajectories,
+            initial_process_noise=ekf_config.get("process_noise", 0.01),
+            initial_observation_noise=ekf_config.get("observation_noise", 0.1),
+            initial_variance=ekf_config.get("initial_variance", 0.1),
+            beta=ekf_config.get("beta", 5.0),
+            seed=config.get("seed", 42),
+        )
+    else:
+        raise ValueError(f"SSM type '{full_type}' not yet implemented")
+
+    return batch_ssm
+
+
+def save_configs(
+    save_dir: Path,
+    config: Dict[str, Any],
+    expert_config: Dict[str, Any],
+    obs_dim: int = None,
+    action_dim: int = None,
+    n_objectives: int = None,
+):
+    """Save training and expert configs before training starts."""
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    # Add dimensions to config if provided
+    if obs_dim is not None:
+        config["obs_dim"] = obs_dim
+    if action_dim is not None:
+        config["action_dim"] = action_dim
+    if n_objectives is not None:
+        config["n_objectives"] = n_objectives
+
+    # Save training config
+    config_path = save_dir / "config.yaml"
+    with open(config_path, "w") as f:
+        yaml.dump(config, f, default_flow_style=False)
+    print(f"Saved config to {config_path}")
+
+    # Save expert config reference
+    expert_config_path = save_dir / "expert_config.yaml"
+    with open(expert_config_path, "w") as f:
+        yaml.dump(expert_config, f, default_flow_style=False)
+    print(f"Saved expert config to {expert_config_path}")
+
+
+def save_model_and_info(
+    save_dir: Path,
+    trainer,
+):
+    """Save model and model info after training."""
+    # Save model
+    model_path = save_dir / "final_model.pt"
+    trainer.save(str(model_path))
+    print(f"Saved model to {model_path}")
+
+    # Save model info
+    model_info = {
+        "total_parameters": sum(p.numel() for p in trainer.q_network.parameters()),
+        "trainable_parameters": sum(
+            p.numel() for p in trainer.q_network.parameters() if p.requires_grad
+        ),
+        "device": str(trainer.device),
+    }
+
+    model_info_path = save_dir / "model_info.json"
+    with open(model_info_path, "w") as f:
+        json.dump(model_info, f, indent=2)
+    print(f"Saved model info to {model_info_path}")
+
+
+def train(config: Dict[str, Any]):
+    """Main training function."""
+    # Load expert configuration and trajectories
+    expert_dir = Path(config["expert_dir"])
+    if not expert_dir.exists():
+        raise FileNotFoundError(f"Expert directory not found: {expert_dir}")
+
+    print(f"Loading expert data from: {expert_dir}")
+    expert_config = load_expert_config(str(expert_dir))
+    expert_trajectories = load_expert_trajectories(
+        str(expert_dir), n_trajectories=config.get("n_trajectories")
     )
 
-    # Create initial SSM
-    ssm = create_ssm(
-        ssm_type=ssm_type,
-        n_objectives=n_objectives,
-        process_noise=ssm_params["process_noise"],
-        observation_noise=ssm_params["observation_noise"],
-        initial_variance=ssm_params["initial_variance"],
-        n_particles=n_particles,
-        beta=beta,
-        seed=seed,
-    )
+    # Get environment name from expert_config (auto-inferred from train_dir path)
+    env_name = expert_config["env_name"]
+    print(f"Environment: {env_name}")
+
+    # Use expert config for environment settings to ensure exact match with expert data
+    # Only override with IQL config for IQL-specific hyperparameters (lr, gamma, tau, etc.)
+    # Expert config has priority for environment settings
+    env_config = {**config, **expert_config}
+
+    print("Environment settings loaded from expert config:")
+    print(f"  use_local_obs: {env_config.get('use_local_obs')}")
+    print(f"  local_obs_size: {env_config.get('local_obs_size')}")
+    print(f"  max_num_treasure: {env_config.get('max_num_treasure')}")
+    print(f"  max_timesteps: {env_config.get('max_timesteps')}")
+
+    # Get dimensions from expert trajectories
+    sample_traj = expert_trajectories[0]
+    obs_dim = len(sample_traj["observations"][0])
+    action_dim = max(max(traj["actions"]) for traj in expert_trajectories) + 1
+    n_objectives = len(sample_traj["preference_weights"][0])
+
+    print(f"Observation dim: {obs_dim}")
+    print(f"Action dim: {action_dim}")
+    print(f"Number of objectives: {n_objectives}")
+
+    # Create SSM for trainer
+    ssm = create_ssm(config, n_objectives, obs_dim, action_dim)
+
+    # Create BatchSSM for MCMC training (will be used periodically)
+    batch_ssm = create_batch_ssm(config, n_objectives, len(expert_trajectories))
+
+    # Extract IQL config (support both new nested format and old flat format for backward compatibility)
+    iql_config = config.get("iql", config)
 
     # Create trainer
     trainer = SSMIQTrainer(
@@ -300,192 +357,397 @@ def train_iql_with_mcmc(config: dict):
         action_dim=action_dim,
         n_objectives=n_objectives,
         ssm_model=ssm,
-        hidden_dim=hidden_dim,
-        lr=lr,
-        gamma=gamma,
-        tau=tau,
-        mismatch_coef=mismatch_coef,
-        device=device,
+        hidden_dim=iql_config.get("hidden_dim", 256),
+        lr=iql_config.get("lr", 1e-4),
+        gamma=iql_config.get("gamma", 0.99),
+        tau=iql_config.get("tau", 0.005),
+        mismatch_coef=iql_config.get("mismatch_coef", 1.0),
+        max_timesteps=config.get("max_timesteps"),
+        device=config.get("device", "cuda"),
     )
 
-    # Create output directory
+    print(f"Device: {trainer.device}")
+    print(f"Model parameters: {sum(p.numel() for p in trainer.q_network.parameters())}")
+
+    # Initialize wandb
+    if config.get("use_wandb", False):
+        wandb.init(
+            project=config.get("wandb_project", "MOIQL"),
+            name=f"iql_{env_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            config={**config, **{"expert_config": expert_config}},
+        )
+
+    # Create results directory
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    save_dir = Path(output_dir) / timestamp
-    save_dir.mkdir(parents=True, exist_ok=True)
+    results_dir = Path(config["save_dir"]) / timestamp
+    results_dir.mkdir(parents=True, exist_ok=True)
 
-    # Save initial config
-    with open(save_dir / "config.yaml", "w") as f:
-        yaml.dump(config, f, default_flow_style=False)
+    # Save configs before training
+    save_configs(results_dir, config, expert_config, obs_dim, action_dim, n_objectives)
 
-    # Training metrics
-    train_metrics = []
-    ssm_param_history = []
+    # Training loop
+    print("\n" + "=" * 70)
+    print("STARTING TRAINING")
+    print("=" * 70)
 
-    print(f"\nStarting training for {num_updates} updates...")
-    print(
-        f"MCMC runs every {mcmc_interval} updates with {mcmc_iterations_per_update} iterations"
-    )
+    n_updates = iql_config.get("n_updates", 10000)
+    n_trajectories = len(expert_trajectories)
 
-    pbar = tqdm(total=num_updates)
+    # Evaluation settings
+    eval_interval = config.get("eval_interval", 100)
 
-    for update in range(num_updates):
-        # MCMC update for SSM parameters (every mcmc_interval updates)
-        if update % mcmc_interval == 0:
-            pbar.set_description("MCMC SSM tuning")
-            ssm_params, accept_rate = mcmc_update_ssm_params(
-                ssm_type=ssm_type,
-                current_params=ssm_params,
-                trajectories=trajectories,
-                trainer=trainer,
-                n_iterations=mcmc_iterations_per_update,
-                device=device,
-                seed=seed + update,
+    # Metrics tracking
+    import csv
+
+    eval_metrics_file = results_dir / "eval_metrics.csv"
+    train_metrics_file = results_dir / "train_metrics.csv"
+    eval_csv_writer = None
+    eval_csv_file = None
+    train_csv_writer = None
+    train_csv_file = None
+
+    # Best model tracking and early stopping
+    best_eval_score = float("inf")
+    best_cross_entropy = None
+    best_preference_mae = None
+    best_update = 0
+    patience_counter = 0
+    early_stopping_patience = config.get("early_stopping_patience", 0)
+
+    # MCMC configuration
+    mcmc_config = config.get("mcmc", {})
+    mcmc_interval = mcmc_config.get("interval", 1000)  # Run MCMC every N updates
+    mcmc_iterations_per_timestep = mcmc_config.get("iterations_per_timestep", 20)
+    mcmc_proposal_scale = mcmc_config.get("proposal_scale", 0.1)
+
+    for update in tqdm(range(n_updates), desc="Training Updates"):
+        # Run MCMC SSM training periodically
+        if update % mcmc_interval == 0 and update > 0:
+            print(f"\n{'='*70}")
+            print(f"MCMC SSM Training at update {update}/{n_updates}")
+            print(f"{'='*70}")
+
+            # Run MCMC training on BatchSSM
+            mcmc_results = batch_ssm.train(
+                trajectories=expert_trajectories,
+                q_network=trainer.q_network,
+                n_iterations_per_timestep=mcmc_iterations_per_timestep,
+                proposal_scale=mcmc_proposal_scale,
+                device=str(trainer.device),
+                seed=config.get("seed", 42) + update,
             )
 
-            # Update trainer's SSM with new parameters
-            trainer.ssm = create_ssm(
-                ssm_type=ssm_type,
-                n_objectives=n_objectives,
-                process_noise=ssm_params["process_noise"],
-                observation_noise=ssm_params["observation_noise"],
-                initial_variance=ssm_params["initial_variance"],
-                n_particles=n_particles,
-                beta=beta,
-                seed=seed + update,
+            # Update trainer's SSM with optimized parameters (use mean of best params across timesteps)
+            timestep_params = mcmc_results["timestep_params"]
+            avg_process_noise = np.mean([p["process_noise"] for p in timestep_params])
+            avg_observation_noise = np.mean(
+                [p["observation_noise"] for p in timestep_params]
             )
 
-            ssm_param_history.append(
-                {
-                    "update": update,
-                    **ssm_params,
-                    "acceptance_rate": accept_rate,
-                }
+            # Update trainer's SSM parameters
+            trainer.ssm.process_noise = avg_process_noise
+            trainer.ssm.observation_noise = avg_observation_noise
+            if hasattr(trainer.ssm, "Q"):
+                trainer.ssm.Q = np.eye(n_objectives) * (avg_process_noise**2)
+            if hasattr(trainer.ssm, "obs_noise_std"):
+                trainer.ssm.obs_noise_std = avg_observation_noise
+
+            print("Updated SSM parameters:")
+            print(f"  Process noise: {avg_process_noise:.6f}")
+            print(f"  Observation noise: {avg_observation_noise:.6f}")
+            print(f"{'='*70}\n")
+
+        # Sample one trajectory randomly
+        traj_idx = np.random.randint(0, n_trajectories)
+        trajectory = expert_trajectories[traj_idx]
+
+        # Update Q-network with this trajectory
+        train_metrics = trainer.update(trajectory)
+
+        # Log training metrics
+        train_log = {
+            "update": update + 1,
+            "train_loss": train_metrics["loss"],
+            "train_preference_mae": train_metrics["preference_mae"],
+            "train_cross_entropy": train_metrics["cross_entropy"],
+        }
+
+        # Add SSM loss if available
+        if "ssm_loss" in train_metrics:
+            train_log["train_ssm_loss"] = train_metrics["ssm_loss"]
+
+        # Save to train CSV
+        if train_csv_writer is None:
+            train_csv_file = open(train_metrics_file, "w", newline="")
+            train_fieldnames = list(train_log.keys())
+            train_csv_writer = csv.DictWriter(
+                train_csv_file, fieldnames=train_fieldnames
             )
+            train_csv_writer.writeheader()
 
-        # Sample batch from trajectories
-        pbar.set_description("Training Q-network")
-        batch = sample_batch_from_trajectories(trajectories, batch_size, seed + update)
+        train_csv_writer.writerow(train_log)
+        train_csv_file.flush()
 
-        # Train Q-network on batch
-        metrics = trainer.update(
-            observations=batch["observations"],
-            actions=batch["actions"],
-            next_observations=batch["next_observations"],
-            q_values_all_batch=batch["q_values_all"],
-        )
-
-        train_metrics.append(
-            {
-                "update": update,
-                **metrics,
-                **{f"ssm_{k}": v for k, v in ssm_params.items()},
+        # Log to wandb
+        if config.get("use_wandb", False):
+            wandb_log = {
+                "train/loss": train_metrics["loss"],
+                "train/preference_mae": train_metrics["preference_mae"],
+                "train/cross_entropy": train_metrics["cross_entropy"],
             }
-        )
 
-        pbar.update(1)
-        pbar.set_postfix(
-            {
-                "q_loss": f"{metrics.get('q_loss', 0):.4f}",
-                "proc_noise": f"{ssm_params['process_noise']:.4f}",
+            # Add SSM loss if available
+            if "ssm_loss" in train_metrics:
+                wandb_log["train/ssm_loss"] = train_metrics["ssm_loss"]
+
+            wandb.log(wandb_log, step=update + 1)
+
+        # Evaluate periodically
+        if (update + 1) % eval_interval == 0 or update == 0:
+            print(f"\n{'='*70}")
+            print(f"Evaluation at update {update + 1}/{n_updates}")
+            print(f"{'='*70}")
+
+            # Evaluate preference prediction accuracy on expert trajectories
+            eval_weights_config = config.get("eval_weights")
+            eval_weights_np = (
+                np.array(eval_weights_config)
+                if eval_weights_config is not None
+                else None
+            )
+            eval_metrics = trainer.evaluate(
+                expert_dir=str(expert_dir),
+                n_trajectories=config.get("n_trajectories"),
+                save_dir=str(results_dir / "eval_predictions"),
+                update_step=update + 1,
+                eval_weights=eval_weights_np,
+            )
+
+            # Combine metrics
+            all_metrics = {
+                "update": update + 1,
+                **eval_metrics,
             }
-        )
 
-        # Save checkpoint periodically
-        if (update + 1) % 1000 == 0:
-            torch.save(
-                {
-                    "q_network": trainer.q_network.state_dict(),
-                    "q_target": trainer.q_target.state_dict(),
-                    "q_optimizer": trainer.q_optimizer.state_dict(),
-                    "ssm_params": ssm_params,
-                    "update": update,
-                },
-                save_dir / f"checkpoint_{update+1}.pt",
+            # Print key metrics
+            print("Evaluation Performance:")
+            print(
+                f"  Preference MAE: {eval_metrics['mean_preference_mae']:.4f} ± {eval_metrics['std_preference_mae']:.4f}"
             )
+            print(
+                f"  Cross-Entropy (Imitation): {eval_metrics['mean_cross_entropy']:.4f} ± {eval_metrics['std_cross_entropy']:.4f}"
+            )
+            if "mean_eval_score" in eval_metrics:
+                print(
+                    f"  Eval Score (w1*CE + w2*MAE): {eval_metrics['mean_eval_score']:.4f} ± {eval_metrics['std_eval_score']:.4f}"
+                )
 
-    pbar.close()
-
-    # Save final model
-    torch.save(
-        {
-            "q_network": trainer.q_network.state_dict(),
-            "q_target": trainer.q_target.state_dict(),
-            "ssm_params": ssm_params,
-        },
-        save_dir / "final_model.pt",
-    )
-
-    # Save metrics
-    import pandas as pd
-
-    pd.DataFrame(train_metrics).to_csv(save_dir / "train_metrics.csv", index=False)
-    pd.DataFrame(ssm_param_history).to_csv(
-        save_dir / "ssm_param_history.csv", index=False
-    )
-
-    print(f"\nTraining complete! Results saved to {save_dir}")
-    print("Final SSM parameters:")
-    for k, v in ssm_params.items():
-        print(f"  {k}: {v:.6f}")
-
-
-def sample_batch_from_trajectories(
-    trajectories: List[Dict],
-    batch_size: int,
-    seed: int,
-) -> Dict[str, np.ndarray]:
-    """Sample a batch of transitions from trajectories."""
-    rng = np.random.RandomState(seed)
-
-    # Collect all transitions
-    all_transitions = []
-    for traj in trajectories:
-        for t in range(len(traj["observations"]) - 1):
-            all_transitions.append(
-                {
-                    "observation": traj["observations"][t],
-                    "action": traj["actions"][t],
-                    "next_observation": traj["observations"][t + 1],
-                    "mo_reward": traj["mo_rewards"][t],
-                    "preference_weights": traj["preference_weights"][t],
+            # Log to wandb
+            if config.get("use_wandb", False):
+                wandb_log_dict = {
+                    "eval/preference_mae_mean": eval_metrics["mean_preference_mae"],
+                    "eval/preference_mae_std": eval_metrics["std_preference_mae"],
+                    "eval/cross_entropy_mean": eval_metrics["mean_cross_entropy"],
+                    "eval/cross_entropy_std": eval_metrics["std_cross_entropy"],
                 }
-            )
+                if "mean_eval_score" in eval_metrics:
+                    wandb_log_dict["eval/eval_score_mean"] = eval_metrics[
+                        "mean_eval_score"
+                    ]
+                    wandb_log_dict["eval/eval_score_std"] = eval_metrics[
+                        "std_eval_score"
+                    ]
 
-    # Sample batch
-    indices = rng.choice(len(all_transitions), size=batch_size, replace=True)
-    batch = [all_transitions[i] for i in indices]
+                wandb.log(wandb_log_dict, step=update + 1)
 
-    # Stack into arrays
-    return {
-        "observations": np.array([t["observation"] for t in batch]),
-        "actions": np.array([t["action"] for t in batch]),
-        "next_observations": np.array([t["next_observation"] for t in batch]),
-        "mo_rewards": np.array([t["mo_reward"] for t in batch]),
-        "preference_weights": np.array([t["preference_weights"] for t in batch]),
-        "q_values_all": None,  # Will be computed by trainer
-    }
+            # Save to eval CSV
+            if eval_csv_writer is None:
+                eval_csv_file = open(eval_metrics_file, "w", newline="")
+                fieldnames = list(all_metrics.keys())
+                eval_csv_writer = csv.DictWriter(eval_csv_file, fieldnames=fieldnames)
+                eval_csv_writer.writeheader()
+
+            eval_csv_writer.writerow(all_metrics)
+            eval_csv_file.flush()
+
+            # Check if this is the best model so far based on eval_score
+            current_cross_entropy = eval_metrics["mean_cross_entropy"]
+            current_preference_mae = eval_metrics["mean_preference_mae"]
+
+            # Use eval_score if available, otherwise fall back to combined criteria
+            if "mean_eval_score" in eval_metrics:
+                current_eval_score = eval_metrics["mean_eval_score"]
+                is_improvement = current_eval_score < best_eval_score
+
+                if is_improvement:
+                    best_eval_score = current_eval_score
+                    best_cross_entropy = current_cross_entropy
+                    best_preference_mae = current_preference_mae
+                    best_update = update + 1
+                    patience_counter = 0  # Reset patience counter
+
+                    # Save best model
+                    best_model_path = results_dir / "best_model.pt"
+                    trainer.save(str(best_model_path))
+                    print(f"\n{'='*70}")
+                    print("NEW BEST MODEL!")
+                    print(f"  Eval Score: {best_eval_score:.4f}")
+                    print(f"  Cross-Entropy: {best_cross_entropy:.4f}")
+                    print(f"  Preference MAE: {best_preference_mae:.4f}")
+                    print(f"Saved to {best_model_path}")
+                    print(f"{'='*70}\n")
+
+                    # Save best model info
+                    best_info = {
+                        "best_eval_score": float(best_eval_score),
+                        "best_cross_entropy": float(best_cross_entropy),
+                        "best_preference_mae": float(best_preference_mae),
+                        "best_update": int(best_update),
+                        "total_updates": n_updates,
+                    }
+                    best_info_path = results_dir / "best_model_info.json"
+                    with open(best_info_path, "w") as f:
+                        json.dump(best_info, f, indent=2)
+                else:
+                    # No improvement
+                    patience_counter += 1
+                    if early_stopping_patience > 0:
+                        print(
+                            f"No improvement for {patience_counter}/{early_stopping_patience} evaluations"
+                        )
+                        print(
+                            f"  Current Eval Score: {current_eval_score:.4f} (CE={current_cross_entropy:.4f}, MAE={current_preference_mae:.4f})"
+                        )
+                        print(
+                            f"  Best Eval Score:    {best_eval_score:.4f} (CE={best_cross_entropy:.4f}, MAE={best_preference_mae:.4f})"
+                        )
+            else:
+                # Fallback: use original logic if eval_score not available
+                cross_entropy_improved = current_cross_entropy < (
+                    best_cross_entropy
+                    if best_cross_entropy is not None
+                    else float("inf")
+                )
+                preference_mae_improved = current_preference_mae < (
+                    best_preference_mae
+                    if best_preference_mae is not None
+                    else float("inf")
+                )
+
+                is_improvement = (
+                    cross_entropy_improved
+                    and (
+                        best_preference_mae is None
+                        or current_preference_mae <= best_preference_mae
+                    )
+                ) or (
+                    preference_mae_improved
+                    and (
+                        best_cross_entropy is None
+                        or current_cross_entropy <= best_cross_entropy
+                    )
+                )
+
+                if is_improvement:
+                    best_cross_entropy = current_cross_entropy
+                    best_preference_mae = current_preference_mae
+                    best_update = update + 1
+                    patience_counter = 0
+
+                    best_model_path = results_dir / "best_model.pt"
+                    trainer.save(str(best_model_path))
+                    print(f"\n{'='*70}")
+                    print("NEW BEST MODEL!")
+                    print(f"  Cross-Entropy: {best_cross_entropy:.4f}")
+                    print(f"  Preference MAE: {best_preference_mae:.4f}")
+                    print(f"Saved to {best_model_path}")
+                    print(f"{'='*70}\n")
+
+                    best_info = {
+                        "best_cross_entropy": float(best_cross_entropy),
+                        "best_preference_mae": float(best_preference_mae),
+                        "best_update": int(best_update),
+                        "total_updates": n_updates,
+                    }
+                    best_info_path = results_dir / "best_model_info.json"
+                    with open(best_info_path, "w") as f:
+                        json.dump(best_info, f, indent=2)
+                else:
+                    patience_counter += 1
+                    if early_stopping_patience > 0:
+                        print(
+                            f"No improvement for {patience_counter}/{early_stopping_patience} evaluations"
+                        )
+                        print(
+                            f"  Current: CE={current_cross_entropy:.4f}, MAE={current_preference_mae:.4f}"
+                        )
+                        print(
+                            f"  Best:    CE={best_cross_entropy:.4f}, MAE={best_preference_mae:.4f}"
+                        )
+
+            # Check early stopping
+            if (
+                early_stopping_patience > 0
+                and patience_counter >= early_stopping_patience
+            ):
+                print(f"\n{'='*70}")
+                print("EARLY STOPPING TRIGGERED")
+                print(f"No improvement for {patience_counter} consecutive evaluations")
+                print(f"Best model was at update {best_update}:")
+                if best_eval_score != float("inf"):
+                    print(f"  Eval Score: {best_eval_score:.4f}")
+                if best_cross_entropy is not None:
+                    print(f"  Cross-Entropy: {best_cross_entropy:.4f}")
+                if best_preference_mae is not None:
+                    print(f"  Preference MAE: {best_preference_mae:.4f}")
+                print(f"{'='*70}\n")
+                break
+
+    # Close CSV files
+    if train_csv_file is not None:
+        train_csv_file.close()
+    if eval_csv_file is not None:
+        eval_csv_file.close()
+
+    print("\n" + "=" * 70)
+    print("TRAINING COMPLETED")
+    if early_stopping_patience > 0 and patience_counter >= early_stopping_patience:
+        print(f"Stopped early after {update + 1} updates (patience exhausted)")
+    else:
+        print(f"Completed all {n_updates} updates")
+    print("=" * 70)
+    print(f"\nBest model at update {best_update}:")
+    if best_eval_score != float("inf"):
+        print(f"  Eval Score: {best_eval_score:.4f}")
+    if best_cross_entropy is not None:
+        print(f"  Cross-Entropy: {best_cross_entropy:.4f}")
+    if best_preference_mae is not None:
+        print(f"  Preference MAE: {best_preference_mae:.4f}")
+
+    if config.get("use_wandb", False):
+        wandb.finish()
+
+    print(f"\nAll results saved to: {results_dir}")
 
 
 def main():
-    """Main function for IQL training with MCMC."""
-    parser = argparse.ArgumentParser(
-        description="Train IQL with MCMC-based SSM hyperparameter tuning"
-    )
+    """Main entry point."""
+    parser = argparse.ArgumentParser(description="Train Objective-Dimensional Soft IQL")
     parser.add_argument(
         "--config",
         type=str,
-        required=True,
+        default="configs/iql.yaml",
         help="Path to configuration file",
     )
 
     args = parser.parse_args()
 
     # Load configuration
-    with open(args.config, "r") as f:
-        config = yaml.safe_load(f)
+    config = load_config(args.config)
+    print(f"Loaded config from {args.config}")
 
-    # Run training
-    train_iql_with_mcmc(config)
+    # Train
+    train(config)
 
 
 if __name__ == "__main__":
