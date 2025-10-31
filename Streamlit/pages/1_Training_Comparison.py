@@ -151,10 +151,6 @@ if all_eval_metrics:
         for model in selected_models
     )
 
-    st.info(
-        f"Showing evaluation metrics at step {min_eval_steps} (minimum across selected models)"
-    )
-
     # Create summary table from eval metrics
     summary_data = []
     for model in selected_models:
@@ -188,8 +184,6 @@ else:
 
 # Plot metrics
 st.header("Metrics Over Training")
-
-st.info(f"Plotting first {min_steps} steps (minimum across selected models)")
 
 # Color palette for models
 colors = [
