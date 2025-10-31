@@ -187,9 +187,20 @@ def save_configs(
     save_dir: Path,
     config: Dict[str, Any],
     expert_config: Dict[str, Any],
+    obs_dim: int = None,
+    action_dim: int = None,
+    n_objectives: int = None,
 ):
     """Save training and expert configs before training starts."""
     save_dir.mkdir(parents=True, exist_ok=True)
+
+    # Add dimensions to config if provided
+    if obs_dim is not None:
+        config["obs_dim"] = obs_dim
+    if action_dim is not None:
+        config["action_dim"] = action_dim
+    if n_objectives is not None:
+        config["n_objectives"] = n_objectives
 
     # Save training config
     config_path = save_dir / "config.yaml"
@@ -305,7 +316,7 @@ def train(config: Dict[str, Any]):
     results_dir.mkdir(parents=True, exist_ok=True)
 
     # Save configs before training
-    save_configs(results_dir, config, expert_config)
+    save_configs(results_dir, config, expert_config, obs_dim, action_dim, n_objectives)
 
     # Training loop
     print("\n" + "=" * 70)

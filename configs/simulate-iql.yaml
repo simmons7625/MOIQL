@@ -1,6 +1,6 @@
 # Simulation configuration for trajectory collection
 # Model settings
-train_dir: "moiql_results/ekf_success/"  # Path to trained model directory
+train_dir: "moiql_results/pf_coef=0/"  # Path to trained model directory
 model_path: 'best_model.pt'  # Filename of the trained model
 training_config: "config.yaml"  # Path to training config (for environment setup)
 

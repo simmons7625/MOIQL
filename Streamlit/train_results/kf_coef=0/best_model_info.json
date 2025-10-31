@@ -1,0 +1,7 @@
+{
+  "best_eval_score": 0.7855255555897134,
+  "best_cross_entropy": 1.1779772170019218,
+  "best_preference_mae": 0.39112046750123036,
+  "best_update": 4000,
+  "total_updates": 10000
+}

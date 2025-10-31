@@ -1,0 +1,10 @@
+deterministic: false
+device: cuda
+max_episode_steps: null
+model_path: best_model.pt
+n_episodes: 100
+output_dir: simulation_iql
+render: false
+render_fps: 1
+train_dir: moiql_results/kf_coef=0/
+training_config: config.yaml

@@ -1,0 +1,16 @@
+{
+  "n_episodes": 100,
+  "mean_length": 79.71,
+  "std_length": 39.240105759286635,
+  "min_length": 1,
+  "max_length": 100,
+  "total_timesteps": 7971,
+  "mean_return": -13.490779876708984,
+  "std_return": 9.419885635375977,
+  "min_return": -36.47135543823242,
+  "max_return": 11.791162490844727,
+  "mean_preference_mae": 0.405904140240508,
+  "std_preference_mae": 0.14429217749629575,
+  "min_preference_mae": 0.16168046541368034,
+  "max_preference_mae": 0.8510266137092422
+}

@@ -331,8 +331,15 @@ class ParticleFilter(StateSpaceModel):
         self.transition_fn = transition_fn
         self.rng = np.random.RandomState(seed)
 
+        # Initialize particles and weights to uniform distribution
+        self.reset()
+
     def _initialize_particles(self) -> np.ndarray:
-        """Initialize particles uniformly on probability simplex."""
+        """
+        Initialize particles uniformly on probability simplex.
+
+        Uses Dirichlet(1,1,...,1) which is the uniform distribution over the simplex.
+        """
         particles = self.rng.dirichlet(
             np.ones(self.n_objectives), size=self.n_particles
         )
@@ -417,8 +424,7 @@ class ParticleFilter(StateSpaceModel):
 
         # Update weights with fitness
         self.weights *= fitness
-        self.weights += 1e-10
-        self.weights /= np.sum(self.weights)
+        self.weights /= np.sum(self.weights) + 1e-8  # Normalize weights
 
         # Resample if effective sample size is too low
         ess = 1.0 / np.sum(self.weights**2)
@@ -426,9 +432,6 @@ class ParticleFilter(StateSpaceModel):
             self._resample()
 
         return None
-
-    def train_step(self, mean_loss):
-        pass
 
 
 class ExtendedKalmanFilter(StateSpaceModel):
@@ -465,22 +468,10 @@ class ExtendedKalmanFilter(StateSpaceModel):
         self.n_objectives = n_objectives
         self.process_noise = process_noise
         self.observation_noise = observation_noise
+        self.initial_variance = initial_variance
         self.beta = beta
         self.rng = np.random.RandomState(seed)
-
-        # State: logits x [n_objectives]
-        # Initialize to zero -> uniform weights after softmax
-        self.x = np.zeros(n_objectives)
-
-        # Covariance matrix [n_objectives, n_objectives]
-        self.P = np.eye(n_objectives) * initial_variance
-
-        # Process noise covariance (random walk on logits)
-        self.Q = np.eye(n_objectives) * (process_noise**2)
-
-        # Observation noise (per action dimension)
         self.obs_noise_std = observation_noise
-
         self._eps = 1e-8
 
     def predict(self, observation: np.ndarray, hidden_state: np.ndarray) -> np.ndarray:
@@ -583,13 +574,16 @@ class ExtendedKalmanFilter(StateSpaceModel):
 
         return None
 
-    def train_step(self, mean_loss):
-        pass
-
     def reset(self):
         """Reset EKF to initial state."""
+        # Initialize to zero -> uniform weights after softmax
         self.x = np.zeros(self.n_objectives)
-        self.P = np.eye(self.n_objectives) * 0.1
+
+        # Covariance matrix [n_objectives, n_objectives]
+        self.P = np.eye(self.n_objectives) * self.initial_variance
+
+        # Process noise covariance (random walk on logits)
+        self.Q = np.eye(self.n_objectives) * (self.process_noise**2)
 
 
 class KalmanFilter(StateSpaceModel):
@@ -625,21 +619,8 @@ class KalmanFilter(StateSpaceModel):
         self.n_objectives = n_objectives
         self.process_noise = process_noise
         self.observation_noise = observation_noise
+        self.initial_variance = initial_variance
         self.rng = np.random.RandomState(seed)
-
-        # State: preference weights w [n_objectives]
-        # Initialize to uniform distribution
-        self.w = np.ones(n_objectives) / n_objectives
-
-        # Covariance matrix [n_objectives, n_objectives]
-        self.P = np.eye(n_objectives) * initial_variance
-
-        # Process noise covariance (random walk on weights)
-        self.Q = np.eye(n_objectives) * (process_noise**2)
-
-        # Observation noise (scalar for mismatch)
-        self.R = observation_noise**2
-
         self._eps = 1e-8
 
     def _project_to_simplex(self, w: np.ndarray) -> np.ndarray:
@@ -770,11 +751,16 @@ class KalmanFilter(StateSpaceModel):
 
         return None
 
-    def train_step(self, mean_loss):
-        """No learning step for standard KF (fully Bayesian update)."""
-        pass
-
     def reset(self):
         """Reset KF to initial state."""
+        # Initialize to uniform distribution
         self.w = np.ones(self.n_objectives) / self.n_objectives
-        self.P = np.eye(self.n_objectives) * 0.1
+
+        # Covariance matrix [n_objectives, n_objectives]
+        self.P = np.eye(self.n_objectives) * self.initial_variance
+
+        # Process noise covariance (random walk on weights)
+        self.Q = np.eye(self.n_objectives) * (self.process_noise**2)
+
+        # Observation noise (scalar for mismatch)
+        self.R = self.observation_noise**2
