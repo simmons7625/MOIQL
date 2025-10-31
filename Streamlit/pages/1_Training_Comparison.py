@@ -89,6 +89,30 @@ if not selected_columns:
     st.warning("Please select at least one metric to plot.")
     st.stop()
 
+# Moving average settings
+st.sidebar.markdown("---")
+st.sidebar.subheader("Smoothing Options")
+use_moving_average = st.sidebar.checkbox(
+    "Apply Moving Average", value=False, help="Smooth the curves using a moving average"
+)
+
+window_size = 1
+if use_moving_average:
+    window_size = st.sidebar.slider(
+        "Window Size",
+        min_value=1,
+        max_value=1000,
+        value=100,
+        step=10,
+        help="Number of data points to average",
+    )
+
+    show_std_band = st.sidebar.checkbox(
+        "Show ± Std Band",
+        value=True,
+        help="Display shaded area showing standard deviation",
+    )
+
 # Combine all dataframes
 combined_df = pd.concat(all_metrics, ignore_index=True)
 
@@ -134,22 +158,68 @@ n_rows = (len(selected_columns) + n_cols - 1) // n_cols
 for idx, metric in enumerate(selected_columns):
     st.subheader(metric.replace("_", " ").title())
 
+    if use_moving_average:
+        st.caption(f"Smoothed with moving average (window size: {window_size})")
+
     fig = go.Figure()
 
     for model_idx, model in enumerate(selected_models):
-        model_df = combined_df[combined_df["model"] == model]
+        model_df = combined_df[combined_df["model"] == model].sort_values("update")
 
         if metric in model_df.columns:
-            fig.add_trace(
-                go.Scatter(
-                    x=model_df["update"],
-                    y=model_df[metric],
-                    name=model,
-                    mode="lines",
-                    line=dict(color=colors[model_idx % len(colors)], width=2),
-                    hovertemplate=f"<b>{model}</b><br>Update: %{{x}}<br>{metric}: %{{y:.4f}}<extra></extra>",
+            # Apply moving average if enabled
+            if use_moving_average and window_size > 1:
+                # Calculate moving average
+                y_smooth = (
+                    model_df[metric].rolling(window=window_size, min_periods=1).mean()
                 )
-            )
+                x_data = model_df["update"]
+
+                # Add smoothed line
+                fig.add_trace(
+                    go.Scatter(
+                        x=x_data,
+                        y=y_smooth,
+                        name=model,
+                        mode="lines",
+                        line=dict(color=colors[model_idx % len(colors)], width=2),
+                        hovertemplate=f"<b>{model}</b><br>Update: %{{x}}<br>{metric}: %{{y:.4f}}<extra></extra>",
+                    )
+                )
+
+                # Add std band if enabled
+                if show_std_band:
+                    y_std = (
+                        model_df[metric]
+                        .rolling(window=window_size, min_periods=1)
+                        .std()
+                    )
+
+                    fig.add_trace(
+                        go.Scatter(
+                            x=x_data.tolist() + x_data.tolist()[::-1],
+                            y=(y_smooth + y_std).tolist()
+                            + (y_smooth - y_std).tolist()[::-1],
+                            fill="toself",
+                            fillcolor=colors[model_idx % len(colors)],
+                            opacity=0.2,
+                            line=dict(color="rgba(255,255,255,0)"),
+                            showlegend=False,
+                            hoverinfo="skip",
+                        )
+                    )
+            else:
+                # Plot raw data
+                fig.add_trace(
+                    go.Scatter(
+                        x=model_df["update"],
+                        y=model_df[metric],
+                        name=model,
+                        mode="lines",
+                        line=dict(color=colors[model_idx % len(colors)], width=2),
+                        hovertemplate=f"<b>{model}</b><br>Update: %{{x}}<br>{metric}: %{{y:.4f}}<extra></extra>",
+                    )
+                )
 
     fig.update_layout(
         xaxis_title="Update",

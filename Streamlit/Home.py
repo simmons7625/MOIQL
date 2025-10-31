@@ -9,18 +9,13 @@ import pandas as pd
 import yaml
 from pathlib import Path
 from typing import Dict, Any, List
-import sys
-
-# Add project root to path
-project_root = Path(__file__).parent.parent
-sys.path.insert(0, str(project_root))
 
 st.set_page_config(page_title="IQL Dashboard", page_icon="🤖", layout="wide")
 
 
-def load_experiment_dirs(base_dir: str = "moiql_results") -> List[Path]:
+def load_experiment_dirs(base_dir: str = "train_results") -> List[Path]:
     """Load all experiment directories from results folder."""
-    base_path = project_root / base_dir
+    base_path = Path(base_dir)
     if not base_path.exists():
         return []
 
@@ -65,26 +60,24 @@ st.title("🤖 IQL Training Results Dashboard")
 st.markdown("""
 Welcome to the IQL (Inverse Q-Learning) Results Dashboard!
 
-This dashboard helps you visualize and analyze training results from your IQL experiments.
+This dashboard helps you visualize and analyze training and simulation results from your IQL experiments.
 
 ### Navigation
 Use the sidebar to navigate between different views:
 - **Home** (this page): Experiment selection and overview
-- **Training Metrics**: Visualize training losses and episode rewards
-- **Preference Accuracy**: Analyze preference prediction quality
-- **Policy Visualization**: Watch trained policies in action
-- **Configuration**: View experiment settings
+- **Training Comparison**: Compare training metrics across multiple models
+- **Simulation Returns**: Compare model performance vs baseline (RL expert)
 
 ### Getting Started
-1. Select a results directory in the sidebar
-2. Choose an experiment from the dropdown
-3. Navigate to different pages to analyze results
+1. Navigate to **Training Comparison** to analyze training metrics across models
+2. Navigate to **Simulation Returns** to compare exploitation performance
+3. Download results as CSV for further analysis
 """)
 
 # Sidebar for experiment selection
 st.sidebar.header("🔍 Experiment Selection")
 
-base_dir = st.sidebar.text_input("Results Directory", value="moiql_results")
+base_dir = st.sidebar.text_input("Results Directory", value="train_results")
 exp_dirs = load_experiment_dirs(base_dir)
 
 if not exp_dirs:
@@ -97,14 +90,14 @@ exp_names = [d.name for d in exp_dirs]
 selected_exp = st.sidebar.selectbox(
     "Select Experiment", exp_names, help="Choose an experiment to analyze"
 )
+selected_exp = Path(selected_exp)
 
 if selected_exp:
-    exp_dir = project_root / base_dir / selected_exp
+    exp_dir = base_dir / selected_exp
 
     # Store in session state for other pages
     st.session_state.exp_dir = str(exp_dir)
     st.session_state.base_dir = base_dir
-    st.session_state.project_root = str(project_root)
 
     # Load data
     config = load_config(exp_dir)
@@ -200,23 +193,20 @@ if selected_exp:
     st.markdown("---")
     st.subheader("Quick Navigation")
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
 
     with col1:
         st.page_link(
-            "pages/1_Training_Metrics.py", label="📈 View Training Metrics", icon="📈"
+            "pages/1_Training_Comparison.py",
+            label="📈 View Training Comparison",
+            icon="📈",
         )
 
     with col2:
         st.page_link(
-            "pages/2_Preference_Accuracy.py",
-            label="🎯 View Preference Accuracy",
+            "pages/2_Simulation_Returns.py",
+            label="🎯 View Simulation Returns",
             icon="🎯",
-        )
-
-    with col3:
-        st.page_link(
-            "pages/3_Policy_Visualization.py", label="🎮 Visualize Policy", icon="🎮"
         )
 
 else:
