@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List
 
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import yaml
@@ -37,6 +38,79 @@ def save_gif(frames: List[np.ndarray], path: Path, fps: int = 10):
         path,
         save_all=True,
         append_images=pil_frames[1:],
+        duration=duration,
+        loop=0,
+    )
+
+
+def create_preference_weights_gif(
+    preference_weights: np.ndarray,
+    path: Path,
+    fps: int = 5,
+    figsize: tuple = (6.65, 6.4),
+):
+    """Create animated GIF showing preference weights evolution over time.
+
+    Args:
+        preference_weights: Array of shape (n_timesteps, n_objectives) with preference weights
+        path: Path to save the GIF
+        fps: Frames per second
+        figsize: Figure size in inches (width, height)
+    """
+    n_timesteps = len(preference_weights)
+    treasure_weights = preference_weights[:, 0]
+    time_weights = preference_weights[:, 1]
+
+    frames = []
+
+    for t in range(n_timesteps):
+        fig, ax = plt.subplots(figsize=figsize, dpi=80)
+
+        # Plot the full trajectory as lines
+        timesteps = np.arange(n_timesteps)
+        ax.plot(
+            timesteps,
+            treasure_weights,
+            "b-",
+            linewidth=2,
+            label="Treasure Weight",
+            alpha=0.7,
+        )
+        ax.plot(
+            timesteps, time_weights, "g-", linewidth=2, label="Time Weight", alpha=0.7
+        )
+
+        # Plot the current position as a red point
+        ax.plot(t, treasure_weights[t], "ro", markersize=12)
+        ax.plot(t, time_weights[t], "ro", markersize=12)
+
+        # Formatting
+        ax.set_xlabel("Timestep", fontsize=12)
+        ax.set_ylabel("Preference Weight", fontsize=12)
+        ax.set_title(
+            f"Preference Weights Evolution (t={t}/{n_timesteps-1})", fontsize=14
+        )
+        ax.set_xlim(-0.5, n_timesteps - 0.5)
+        ax.set_ylim(-0.05, 1.05)
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc="best", fontsize=10)
+
+        # Convert plot to image
+        fig.canvas.draw()
+        image = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8)
+        image = image.reshape(fig.canvas.get_width_height()[::-1] + (4,))
+        # Convert RGBA to RGB
+        image_rgb = image[:, :, :3]
+        frames.append(Image.fromarray(image_rgb))
+
+        plt.close(fig)
+
+    # Save as GIF
+    duration = int(1000 / fps)  # Duration in milliseconds
+    frames[0].save(
+        path,
+        save_all=True,
+        append_images=frames[1:],
         duration=duration,
         loop=0,
     )
@@ -319,12 +393,20 @@ def simulate(config: dict):
         episode_returns.append(episode_return)
         episode_lengths.append(episode_length)
 
-        # Save GIF for first episode if requested
+        # Save GIFs for first episode if requested
         if should_save_render and "frames" in trajectory:
-            save_gif(
-                trajectory["frames"], output_path / "episode_0.gif", fps=render_fps
-            )
-            print(f"Saved rendering to {output_path / 'episode_0.gif'}")
+            # Save episode GIF
+            gif_path = output_path / "episode.gif"
+            save_gif(trajectory["frames"], gif_path, fps=render_fps)
+            print(f"Saved episode rendering to {gif_path}")
+
+            # Save preference weights GIF
+            if isinstance(trajectory["preference_weights"], np.ndarray):
+                pref_gif_path = output_path / "preference_weights.gif"
+                create_preference_weights_gif(
+                    trajectory["preference_weights"], pref_gif_path, fps=render_fps
+                )
+                print(f"Saved preference weights visualization to {pref_gif_path}")
 
     # Compute statistics
     stats = {
