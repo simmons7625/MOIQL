@@ -1,41 +1,58 @@
-# IQL Training with MCMC-based SSM Hyperparameter Tuning
+# Configuration for Objective-Dimensional Soft Inverse Q-Learning (OD-SQIL) with MCMC SSM
 
-# Data
-trajectories_path: "simulation_rl/dst_from_1_decay_1e-2/trajectories.json"
+# Expert data source
+# - Environment name is auto-detected from train_dir path (dst_train -> deep_sea_treasure, highway_train -> mo-highway)
+# - All environment settings are loaded from expert_dir/train_dir/config.yaml
+expert_dir: "simulation_rl/dst/"
+n_trajectories: 100  # Number of trajectories to use from expert dataset
 
-# SSM type
-ssm_type: "kf"  # pf, kf, ekf
+# IQL training configuration
+iql:
+  hidden_dim: 256  # Network hidden dimension
+  lr: 1.0e-6  # Learning rate for Q-network
+  gamma: 0.99  # Discount factor
+  tau: 0.005  # Soft update coefficient for target network
+  mismatch_coef: 0.0  # Coefficient for mismatch regularization term (0 = disabled, SSM handles preference learning)
+  n_updates: 10000  # Total number of training updates (one trajectory per update)
 
-# Training hyperparameters
-num_updates: 10000  # Total number of training updates
-batch_size: 256  # Batch size for Q-network training
+# State Space Model (SSM) for preference prediction
+ssm_type: "ekf"  # Options: "pf" (particle filter), "kf" (kalman filter), "ekf" (extended kalman filter)
 
-# MCMC settings
-mcmc_interval: 100  # Run MCMC every N updates
-mcmc_iterations_per_update: 10  # Number of MCMC iterations per update
+# Particle Filter settings (used if ssm_type == "pf")
+particle_filter:
+  n_particles: 1000
+  process_noise: 0.01
+  observation_noise: 0.05
 
-# Initial SSM hyperparameters
-initial_process_noise: 0.01
-initial_observation_noise: 0.1
-initial_initial_variance: 0.1
+# Kalman Filter settings (used if ssm_type == "kf")
+kf:
+  process_noise: 0.01
+  observation_noise: 0.05
+  initial_variance: 1.0e+3
 
-# Model architecture
-n_objectives: 2
-hidden_dim: 256
+# Extended Kalman Filter settings (used if ssm_type == "ekf")
+ekf:
+  process_noise: 0.05
+  observation_noise: 0.1
+  initial_variance: 1.0e+3
+  beta: 1.0  # Temperature for margin->probability (higher = sharper distribution)
 
-# Q-network hyperparameters
-lr: 1.0e-5  # Learning rate
-gamma: 0.99  # Discount factor
-tau: 0.005  # Soft update coefficient
-mismatch_coef: 1.0  # Coefficient for mismatch regularization
+# MCMC settings for per-timestep noise parameter tuning
+mcmc:
+  interval: 1000  # Run MCMC every N training updates
+  iterations_per_timestep: 20  # Number of MCMC iterations per timestep (keep low for speed)
+  proposal_scale: 0.1  # Standard deviation of random walk proposals in log-space
 
-# SSM model-specific parameters
-n_particles: 1000  # For particle filter
-beta: 5.0  # For extended Kalman filter
-
-# General settings
-device: "cuda"  # cuda or cpu
+# Device
+device: "cuda"
 seed: 42
 
-# Output
-output_dir: "mcmc_moiql_results"
+# Logging
+use_wandb: false
+wandb_project: "MOIQL-MCMC"
+save_dir: "moiql_mcmc_results"
+
+# Evaluation
+eval_interval: 1000  # Evaluate every N updates
+early_stopping_patience: 0  # Stop training if no improvement for N evaluations (0 = disabled)
+eval_weights: [0.5, 0.5]  # Weights [w1, w2] for computing eval_score = w1*cross_entropy + w2*preference_mae
