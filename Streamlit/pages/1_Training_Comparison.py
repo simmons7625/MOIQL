@@ -60,14 +60,31 @@ def load_training_metrics(model_name):
     return None
 
 
+@st.cache_data
+def load_eval_metrics(model_name):
+    """Load evaluation metrics CSV for a model."""
+    csv_path = TRAIN_RESULTS_DIR / model_name / "eval_metrics.csv"
+    if csv_path.exists():
+        df = pd.read_csv(csv_path)
+        df["model"] = model_name
+        return df
+    return None
+
+
 # Load all metrics
 all_metrics = []
+all_eval_metrics = []
 for model in selected_models:
     df = load_training_metrics(model)
+    eval_df = load_eval_metrics(model)
     if df is not None:
         all_metrics.append(df)
     else:
         st.warning(f"⚠️ No train_metrics.csv found for {model}")
+    if eval_df is not None:
+        all_eval_metrics.append(eval_df)
+    else:
+        st.warning(f"⚠️ No eval_metrics.csv found for {model}")
 
 if not all_metrics:
     st.error("No valid training metrics found for selected models.")
@@ -120,29 +137,59 @@ combined_df = pd.concat(all_metrics, ignore_index=True)
 min_steps = min(
     len(combined_df[combined_df["model"] == model]) for model in selected_models
 )
-st.info(f"Plotting first {min_steps} steps (minimum across selected models)")
 
-# Display summary statistics
-st.header("Summary Statistics")
+# Display summary statistics from eval_metrics
+st.header("Summary Statistics (Evaluation Metrics)")
 
-# Create summary table
-summary_data = []
-for model in selected_models:
-    model_df = combined_df[combined_df["model"] == model].sort_values("update")
-    # Truncate to minimum step length
-    model_df = model_df.head(min_steps)
-    row = {"Model": model}
-    for col in selected_columns:
-        if col in model_df.columns:
-            final_value = model_df[col].iloc[-1]
-            row[f"{col} (at step {min_steps})"] = f"{final_value:.4f}"
-    summary_data.append(row)
+if all_eval_metrics:
+    # Combine all eval metrics
+    combined_eval_df = pd.concat(all_eval_metrics, ignore_index=True)
 
-summary_df = pd.DataFrame(summary_data)
-st.dataframe(summary_df, use_container_width=True)
+    # Find minimum eval steps
+    min_eval_steps = min(
+        len(combined_eval_df[combined_eval_df["model"] == model])
+        for model in selected_models
+    )
+
+    st.info(
+        f"Showing evaluation metrics at step {min_eval_steps} (minimum across selected models)"
+    )
+
+    # Create summary table from eval metrics
+    summary_data = []
+    for model in selected_models:
+        model_eval_df = combined_eval_df[
+            combined_eval_df["model"] == model
+        ].sort_values("update")
+        # Truncate to minimum step length
+        model_eval_df = model_eval_df.head(min_eval_steps)
+
+        if len(model_eval_df) > 0:
+            row = {"Model": model}
+            # Get the last row (at min_eval_steps)
+            last_row = model_eval_df.iloc[-1]
+
+            # Extract mean and std columns
+            for col in model_eval_df.columns:
+                if col not in ["update", "model"]:
+                    if col.startswith("mean_"):
+                        metric_name = col.replace("mean_", "")
+                        std_col = f"std_{metric_name}"
+                        if std_col in model_eval_df.columns:
+                            mean_val = last_row[col]
+                            std_val = last_row[std_col]
+                            row[metric_name] = f"{mean_val:.4f} ± {std_val:.4f}"
+            summary_data.append(row)
+
+    summary_df = pd.DataFrame(summary_data)
+    st.dataframe(summary_df, use_container_width=True)
+else:
+    st.warning("No evaluation metrics found for selected models.")
 
 # Plot metrics
 st.header("Metrics Over Training")
+
+st.info(f"Plotting first {min_steps} steps (minimum across selected models)")
 
 # Color palette for models
 colors = [
