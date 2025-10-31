@@ -1,0 +1,31 @@
+# Batch Bayesian Auto-Tuning Configuration for SSM
+
+# Data paths
+trajectories_path: "Streamlit/dataset/dst/trajectories.json"  # Path to trajectories JSON
+model_path: "Streamlit/train_results/kf_coef=0/best_model.pt"  # Path to trained IQL Q-network
+
+# SSM type: particle_filter, kalman_filter, or extended_kalman_filter
+ssm_type: "extended_kalman_filter"
+
+# Tuning method
+use_mcmc: true  # Use MCMC (true) or grid search (false)
+
+# MCMC settings (if use_mcmc=true)
+n_iterations: 500  # Number of MCMC iterations
+n_warmup: 100  # Number of warmup/burn-in iterations
+
+# Grid search space (if use_mcmc=false)
+process_noise_values: [0.01, 0.05, 0.1]
+observation_noise_values: [0.05, 0.1, 0.2]
+initial_variance_values: [0.05, 0.1]  # Only for KF/EKF
+
+# Model-specific parameters
+n_particles: 1000  # For particle filter
+beta: 5.0  # For extended Kalman filter (temperature parameter)
+
+# Training settings
+device: "cuda"  # cuda or cpu
+seed: 42
+
+# Output settings
+output_dir: "batch_ssm_results"  # Directory to save results
