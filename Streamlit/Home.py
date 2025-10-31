@@ -113,81 +113,15 @@ if selected_exp:
     st.header(f"📊 Experiment: {selected_exp}")
 
     # Key metrics
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2 = st.columns(2)
 
     with col1:
         env_name = expert_config.get("env_name", "Unknown")
         st.metric("Environment", env_name)
 
     with col2:
-        n_updates = config.get("n_updates", "N/A")
-        st.metric(
-            "Total Updates",
-            f"{n_updates:,}" if isinstance(n_updates, int) else n_updates,
-        )
-
-    with col3:
         n_trajectories = config.get("n_trajectories", "N/A")
         st.metric("N Trajectories", n_trajectories)
-
-    with col4:
-        if not metrics_df.empty:
-            final_reward = metrics_df.iloc[-1]["mean_episode_reward"]
-            st.metric("Final Reward", f"{final_reward:.2f}")
-        else:
-            st.metric("Final Reward", "N/A")
-
-    # Experiment details
-    st.subheader("Experiment Details")
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.markdown("**Training Configuration**")
-        st.write(f"- Learning Rate: {config.get('lr', 'N/A')}")
-        st.write(f"- Batch Size: {config.get('batch_size', 'N/A')}")
-        st.write(f"- Hidden Dim: {config.get('hidden_dim', 'N/A')}")
-        st.write(f"- Gamma: {config.get('gamma', 'N/A')}")
-        st.write(f"- Mismatch Coef: {config.get('mismatch_coef', 'N/A')}")
-
-    with col2:
-        st.markdown("**Expert Configuration**")
-        st.write(f"- Environment: {expert_config.get('env_name', 'N/A')}")
-        st.write(f"- Init Weight: {expert_config.get('init_weight', 'N/A')}")
-        st.write(f"- Continuous Decay: {expert_config.get('contenous_decay', 'N/A')}")
-
-        if expert_config.get("env_name") == "mo-highway":
-            st.write(
-                f"- Safety Distance: {expert_config.get('safety_distance_threshold', 'N/A')}"
-            )
-            st.write(
-                f"- Safety Boost: {expert_config.get('safety_boost_factor', 'N/A')}"
-            )
-
-    # Training progress
-    if not metrics_df.empty:
-        st.subheader("Training Progress Summary")
-
-        col1, col2, col3 = st.columns(3)
-
-        with col1:
-            st.markdown("**Losses (Final)**")
-            final_row = metrics_df.iloc[-1]
-            st.write(f"- Total: {final_row['total_loss']:.4f}")
-            st.write(f"- Soft IQ: {final_row['soft_iq_loss']:.4f}")
-            st.write(f"- Actor: {final_row['actor_loss']:.4f}")
-            st.write(f"- Mismatch: {final_row['mismatch_loss']:.4f}")
-
-        with col2:
-            st.markdown("**Preference Accuracy (Final)**")
-            st.write(f"- MSE: {final_row['preference_mse']:.6f}")
-            st.write(f"- MAE: {final_row['preference_mae']:.6f}")
-
-        with col3:
-            st.markdown("**Episode Performance (Final)**")
-            st.write(f"- Mean Reward: {final_row['mean_episode_reward']:.2f}")
-            st.write(f"- Std Reward: {final_row['std_episode_reward']:.2f}")
-            st.write(f"- Mean Length: {final_row['mean_episode_length']:.1f}")
 
     # Quick navigation
     st.markdown("---")
@@ -198,14 +132,14 @@ if selected_exp:
     with col1:
         st.page_link(
             "pages/1_Training_Comparison.py",
-            label="📈 View Training Comparison",
+            label="View Training Comparison",
             icon="📈",
         )
 
     with col2:
         st.page_link(
             "pages/2_Simulation_Returns.py",
-            label="🎯 View Simulation Returns",
+            label="View Simulation Returns",
             icon="🎯",
         )
 

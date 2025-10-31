@@ -6,17 +6,40 @@ import argparse
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Dict
+from typing import Dict, List
 
 import numpy as np
 import torch
 import yaml
 from tqdm import tqdm
+from PIL import Image
 
 import mo_gymnasium as gym
 from src.highway.env import HighwayWrapper
 from src.highway.reward_function import RewardFunction, HighwayPreferenceFunction
 from src.highway.model import ActorCritic
+
+
+def save_gif(frames: List[np.ndarray], path: Path, fps: int = 10):
+    """Save a list of frames as a GIF.
+
+    Args:
+        frames: List of numpy arrays representing frames (H, W, C)
+        path: Path to save the GIF
+        fps: Frames per second
+    """
+    # Convert numpy arrays to PIL Images
+    pil_frames = [Image.fromarray(frame) for frame in frames]
+
+    # Save as GIF
+    duration = int(1000 / fps)  # Duration in milliseconds
+    pil_frames[0].save(
+        path,
+        save_all=True,
+        append_images=pil_frames[1:],
+        duration=duration,
+        loop=0,
+    )
 
 
 def load_config(config_path: str) -> dict:
@@ -86,6 +109,7 @@ def collect_trajectory(
     device: str,
     max_episode_steps: int = None,
     deterministic: bool = False,
+    save_render: bool = False,
 ) -> Dict:
     """
     Collect a single trajectory.
@@ -97,6 +121,7 @@ def collect_trajectory(
         device: Device to run model on
         max_episode_steps: Maximum timesteps per episode (None = use done signal only)
         deterministic: If True, take argmax action; otherwise sample
+        save_render: If True, capture frames for rendering
 
     Returns:
         Dictionary containing trajectory data
@@ -111,9 +136,18 @@ def collect_trajectory(
         "infos": [],
     }
 
+    # For rendering
+    frames = [] if save_render else None
+
     obs, info = env.reset()
     reward_fn.reset()
     episode_step = 0
+
+    # Capture initial frame if rendering
+    if save_render:
+        frame = env.render()
+        if frame is not None:
+            frames.append(frame)
 
     while True:
         # Store observation
@@ -149,6 +183,12 @@ def collect_trajectory(
         obs = next_obs
         episode_step += 1
 
+        # Capture frame after action if rendering
+        if save_render:
+            frame = env.render()
+            if frame is not None:
+                frames.append(frame)
+
         # Check termination: use max_episode_steps if set, otherwise use done signal
         if max_episode_steps is not None:
             if episode_step >= max_episode_steps:
@@ -166,6 +206,10 @@ def collect_trajectory(
     if trajectory["preference_weights"][0] is not None:
         trajectory["preference_weights"] = np.array(trajectory["preference_weights"])
     trajectory["dones"] = np.array(trajectory["dones"])
+
+    # Add frames to trajectory if rendering
+    if save_render:
+        trajectory["frames"] = frames
 
     return trajectory
 
@@ -197,6 +241,7 @@ def simulate(config: dict):
     deterministic = config.get("deterministic", False)
     device = config.get("device", "cuda")
     render = config.get("render", False)
+    save_render = config.get("save_render", False)
     render_fps = config.get("render_fps", 10)
 
     # Handle init_weight - can be a list or scalar
@@ -252,6 +297,9 @@ def simulate(config: dict):
 
     print(f"\nCollecting {n_episodes} episodes...")
     for episode in tqdm(range(n_episodes)):
+        # Only save render for the first episode
+        should_save_render = save_render and episode == 0
+
         trajectory = collect_trajectory(
             env=env,
             model=model,
@@ -259,6 +307,7 @@ def simulate(config: dict):
             device=device,
             max_episode_steps=max_episode_steps,
             deterministic=deterministic,
+            save_render=should_save_render,
         )
         trajectories.append(trajectory)
 
@@ -267,6 +316,12 @@ def simulate(config: dict):
         episode_length = len(trajectory["rewards"])
         episode_returns.append(episode_return)
         episode_lengths.append(episode_length)
+
+        # Save GIF for first episode if requested
+        if should_save_render and "frames" in trajectory:
+            gif_path = output_path / "episode_0.gif"
+            save_gif(trajectory["frames"], gif_path, fps=render_fps)
+            print(f"Saved rendering to {gif_path}")
 
     # Compute statistics
     stats = {

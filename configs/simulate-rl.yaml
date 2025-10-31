@@ -9,6 +9,7 @@ n_episodes: 100  # Number of episodes to simulate
 max_episode_steps: null  # Max timesteps per episode. null means no limit use done signal only
 deterministic: false  # Use deterministic policy (argmax) vs stochastic (sampling)
 render: false  # Enable pygame rendering to watch episodes (set to true to visualize)
+save_render: false  # Save rendered episodes as videos
 render_fps: 1  # Frames per second when rendering
 device: "cuda"  # cuda or cpu
 

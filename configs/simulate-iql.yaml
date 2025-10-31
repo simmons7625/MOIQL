@@ -1,13 +1,13 @@
 # Simulation configuration for trajectory collection
 # Model settings
-train_dir: "moiql_results/pf_coef=0/"  # Path to trained model directory
+train_dir: "moiql_results/kf_coef=0/"  # Path to trained model directory
 model_path: 'best_model.pt'  # Filename of the trained model
 training_config: "config.yaml"  # Path to training config (for environment setup)
 
 # Simulation settings
 n_episodes: 100  # Number of episodes to simulate
 max_episode_steps: null  # Max timesteps per episode. null means no limit use done signal only
-deterministic: false  # Use deterministic policy (argmax) vs stochastic (sampling)
+deterministic: true  # Use deterministic policy (argmax) vs stochastic (sampling)
 render: false  # Enable pygame rendering to watch episodes (set to true to visualize)
 render_fps: 1  # Frames per second when rendering
 device: "cuda"  # cuda or cpu
