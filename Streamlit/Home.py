@@ -75,20 +75,6 @@ if baseline_gif_path.exists() or preference_gif_path.exists():
     col1, col2 = st.columns(2)
 
     with col1:
-        if baseline_gif_path.exists():
-            # Display episode GIF using base64 encoding
-            file_ = open(baseline_gif_path, "rb")
-            contents = file_.read()
-            data_url = base64.b64encode(contents).decode("utf-8")
-            file_.close()
-
-            st.markdown(
-                f'<img src="data:image/gif;base64,{data_url}" alt="Baseline RL Expert Episode" width="400">',
-                unsafe_allow_html=True,
-            )
-            st.caption("Episode visualization")
-
-    with col2:
         if preference_gif_path.exists():
             # Display preference weights GIF using base64 encoding
             file_ = open(preference_gif_path, "rb")
@@ -97,10 +83,24 @@ if baseline_gif_path.exists() or preference_gif_path.exists():
             file_.close()
 
             st.markdown(
-                f'<img src="data:image/gif;base64,{data_url}" alt="Preference Weights Evolution" width="400">',
+                f'<img src="data:image/gif;base64,{data_url}" alt="Preference Weights Evolution" width="600">',
                 unsafe_allow_html=True,
             )
             st.caption("Preference weights evolution")
+
+    with col2:
+        if baseline_gif_path.exists():
+            # Display episode GIF using base64 encoding
+            file_ = open(baseline_gif_path, "rb")
+            contents = file_.read()
+            data_url = base64.b64encode(contents).decode("utf-8")
+            file_.close()
+
+            st.markdown(
+                f'<img src="data:image/gif;base64,{data_url}" alt="Baseline RL Expert Episode" width="600">',
+                unsafe_allow_html=True,
+            )
+            st.caption("Episode visualization")
 
     st.caption(
         "This shows the trained RL expert navigating the Deep Sea Treasure environment with time-varying preferences."
