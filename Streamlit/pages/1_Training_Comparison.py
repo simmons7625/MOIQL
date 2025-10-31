@@ -116,18 +116,26 @@ if use_moving_average:
 # Combine all dataframes
 combined_df = pd.concat(all_metrics, ignore_index=True)
 
+# Find minimum step length across all selected models
+min_steps = min(
+    len(combined_df[combined_df["model"] == model]) for model in selected_models
+)
+st.info(f"Plotting first {min_steps} steps (minimum across selected models)")
+
 # Display summary statistics
 st.header("Summary Statistics")
 
 # Create summary table
 summary_data = []
 for model in selected_models:
-    model_df = combined_df[combined_df["model"] == model]
+    model_df = combined_df[combined_df["model"] == model].sort_values("update")
+    # Truncate to minimum step length
+    model_df = model_df.head(min_steps)
     row = {"Model": model}
     for col in selected_columns:
         if col in model_df.columns:
             final_value = model_df[col].iloc[-1]
-            row[f"{col} (final)"] = f"{final_value:.4f}"
+            row[f"{col} (at step {min_steps})"] = f"{final_value:.4f}"
     summary_data.append(row)
 
 summary_df = pd.DataFrame(summary_data)
@@ -165,6 +173,9 @@ for idx, metric in enumerate(selected_columns):
 
     for model_idx, model in enumerate(selected_models):
         model_df = combined_df[combined_df["model"] == model].sort_values("update")
+
+        # Truncate to minimum step length
+        model_df = model_df.head(min_steps)
 
         if metric in model_df.columns:
             # Apply moving average if enabled
