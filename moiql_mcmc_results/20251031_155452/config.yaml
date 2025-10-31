@@ -1,0 +1,40 @@
+action_dim: 4
+device: cuda
+early_stopping_patience: 0
+ekf:
+  beta: 1.0
+  initial_variance: 1000.0
+  observation_noise: 0.1
+  process_noise: 0.05
+eval_interval: 1000
+eval_weights:
+- 0.5
+- 0.5
+expert_dir: simulation_rl/dst_from_1_decay_1e-2/
+iql:
+  gamma: 0.99
+  hidden_dim: 256
+  lr: 1.0e-06
+  mismatch_coef: 0.0
+  n_updates: 10000
+  tau: 0.005
+kf:
+  initial_variance: 1000.0
+  observation_noise: 0.05
+  process_noise: 0.01
+mcmc:
+  interval: 1000
+  iterations_per_timestep: 20
+  proposal_scale: 0.1
+n_objectives: 2
+n_trajectories: 100
+obs_dim: 28
+particle_filter:
+  n_particles: 1000
+  observation_noise: 0.05
+  process_noise: 0.01
+save_dir: moiql_mcmc_results
+seed: 42
+ssm_type: ekf
+use_wandb: false
+wandb_project: MOIQL-MCMC

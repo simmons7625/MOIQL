@@ -175,6 +175,14 @@ class BatchSSM:
             actions = traj["actions"]
             true_preferences = traj["preference_weights"]
 
+            # Convert to numpy arrays if needed
+            if isinstance(observations, list):
+                observations = [np.array(obs) for obs in observations]
+            if isinstance(actions, list):
+                actions = np.array(actions)
+            if isinstance(true_preferences, list):
+                true_preferences = [np.array(pref) for pref in true_preferences]
+
             # Create temporary SSM
             temp_ssm = self._create_ssm(
                 process_noise,
@@ -189,7 +197,12 @@ class BatchSSM:
                 action = actions[t]
 
                 # Get Q-values
-                obs_tensor = torch.FloatTensor(obs.flatten()).unsqueeze(0).to(device)
+                obs_flat = (
+                    obs.flatten()
+                    if isinstance(obs, np.ndarray)
+                    else np.array(obs).flatten()
+                )
+                obs_tensor = torch.FloatTensor(obs_flat).unsqueeze(0).to(device)
                 with torch.no_grad():
                     _, q_values = q_network.act(obs_tensor)
                     q_values_all = q_values.squeeze(0).cpu().numpy()
@@ -354,8 +367,16 @@ class BatchSSM:
                 obs = traj["observations"][t]
                 action = traj["actions"][t]
 
+                # Convert to numpy if needed
+                obs = np.array(obs) if isinstance(obs, list) else obs
+
                 # Get Q-values
-                obs_tensor = torch.FloatTensor(obs.flatten()).unsqueeze(0).to(device)
+                obs_flat = (
+                    obs.flatten()
+                    if isinstance(obs, np.ndarray)
+                    else np.array(obs).flatten()
+                )
+                obs_tensor = torch.FloatTensor(obs_flat).unsqueeze(0).to(device)
                 with torch.no_grad():
                     _, q_values = q_network.act(obs_tensor)
                     q_values_all = q_values.squeeze(0).cpu().numpy()
