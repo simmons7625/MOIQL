@@ -61,7 +61,27 @@ st.markdown("""
 Welcome to the IQL (Inverse Q-Learning) Results Dashboard!
 
 This dashboard helps you visualize and analyze training and simulation results from your IQL experiments.
+""")
 
+# Display baseline episode GIF if available
+baseline_gif_path = Path("dataset/dst/episode.gif")
+if baseline_gif_path.exists():
+    st.subheader("🎮 Baseline Expert Performance")
+    st.markdown("**RL Expert Agent (Deep Sea Treasure)**")
+
+    # Display GIF - pass path directly for animation to work
+    st.image(
+        str(baseline_gif_path),
+        caption="Baseline RL Expert Episode",
+        use_container_width=False,
+        width=400,
+    )
+
+    st.caption(
+        "This shows the trained RL expert navigating the Deep Sea Treasure environment."
+    )
+
+st.markdown("""
 ### Navigation
 Use the sidebar to navigate between different views:
 - **Home** (this page): Experiment selection and overview
