@@ -4,6 +4,7 @@ IQL Dashboard - Home Page
 Main landing page for experiment selection and overview.
 """
 
+import base64
 import streamlit as st
 import pandas as pd
 import yaml
@@ -69,12 +70,15 @@ if baseline_gif_path.exists():
     st.subheader("🎮 Baseline Expert Performance")
     st.markdown("**RL Expert Agent (Deep Sea Treasure)**")
 
-    # Display GIF - pass path directly for animation to work
-    st.image(
-        str(baseline_gif_path),
-        caption="Baseline RL Expert Episode",
-        use_container_width=False,
-        width=400,
+    # Display animated GIF using base64 encoding
+    file_ = open(baseline_gif_path, "rb")
+    contents = file_.read()
+    data_url = base64.b64encode(contents).decode("utf-8")
+    file_.close()
+
+    st.markdown(
+        f'<img src="data:image/gif;base64,{data_url}" alt="Baseline RL Expert Episode" width="400">',
+        unsafe_allow_html=True,
     )
 
     st.caption(
