@@ -49,7 +49,7 @@ def create_ssm(
     seed: int = 42,
 ):
     """Create SSM model with given hyperparameters."""
-    if ssm_type == "particle_filter":
+    if ssm_type == "pf":
         return ParticleFilter(
             n_objectives=n_objectives,
             n_particles=n_particles,
@@ -57,7 +57,7 @@ def create_ssm(
             observation_noise=observation_noise,
             seed=seed,
         )
-    elif ssm_type == "kalman_filter":
+    elif ssm_type == "kf":
         return KalmanFilter(
             n_objectives=n_objectives,
             process_noise=process_noise,
@@ -65,7 +65,7 @@ def create_ssm(
             initial_variance=initial_variance,
             seed=seed,
         )
-    elif ssm_type == "extended_kalman_filter":
+    elif ssm_type == "ekf":
         return ExtendedKalmanFilter(
             n_objectives=n_objectives,
             process_noise=process_noise,
@@ -79,6 +79,7 @@ def create_ssm(
 
 
 def mcmc_update_ssm_params(
+    ssm_type: str,
     current_params: Dict[str, float],
     trajectories: List[Dict],
     trainer: SSMIQTrainer,
@@ -113,7 +114,7 @@ def mcmc_update_ssm_params(
 
     # Evaluate current parameters
     current_log_likelihood = evaluate_params_on_trajectories(
-        current_params, trajectories, trainer, device
+        ssm_type, current_params, trajectories, trainer, device
     )
 
     best_params = current_params.copy()
@@ -149,7 +150,7 @@ def mcmc_update_ssm_params(
 
         # Evaluate proposed parameters
         proposed_log_likelihood = evaluate_params_on_trajectories(
-            proposed_params, trajectories, trainer, device
+            ssm_type, proposed_params, trajectories, trainer, device
         )
 
         # Metropolis-Hastings acceptance
@@ -170,6 +171,7 @@ def mcmc_update_ssm_params(
 
 
 def evaluate_params_on_trajectories(
+    ssm_type: str,
     params: Dict[str, float],
     trajectories: List[Dict],
     trainer: SSMIQTrainer,
@@ -182,7 +184,7 @@ def evaluate_params_on_trajectories(
     """
     # Create temporary SSM with these parameters
     temp_ssm = create_ssm(
-        ssm_type=type(trainer.ssm).__name__.replace("Filter", "_filter").lower(),
+        ssm_type=ssm_type,
         n_objectives=trainer.n_objectives,
         process_noise=params["process_noise"],
         observation_noise=params["observation_noise"],
@@ -331,6 +333,7 @@ def train_iql_with_mcmc(config: dict):
         if update % mcmc_interval == 0:
             pbar.set_description("MCMC SSM tuning")
             ssm_params, accept_rate = mcmc_update_ssm_params(
+                ssm_type=ssm_type,
                 current_params=ssm_params,
                 trajectories=trajectories,
                 trainer=trainer,

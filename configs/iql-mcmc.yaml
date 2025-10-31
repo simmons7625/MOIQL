@@ -1,10 +1,10 @@
 # IQL Training with MCMC-based SSM Hyperparameter Tuning
 
 # Data
-trajectories_path: "Streamlit/dataset/dst/trajectories.json"
+trajectories_path: "simulation_rl/dst_from_1_decay_1e-2/trajectories.json"
 
 # SSM type
-ssm_type: "extended_kalman_filter"  # particle_filter, kalman_filter, or extended_kalman_filter
+ssm_type: "pf"  # pf, kf, ekf
 
 # Training hyperparameters
 num_updates: 10000  # Total number of training updates
@@ -12,7 +12,7 @@ batch_size: 256  # Batch size for Q-network training
 
 # MCMC settings
 mcmc_interval: 100  # Run MCMC every N updates
-mcmc_iterations_per_update: 20  # Number of MCMC iterations per update
+mcmc_iterations_per_update: 10  # Number of MCMC iterations per update
 
 # Initial SSM hyperparameters
 initial_process_noise: 0.01
@@ -24,7 +24,7 @@ n_objectives: 2
 hidden_dim: 256
 
 # Q-network hyperparameters
-lr: 3.0e-4  # Learning rate
+lr: 1.0e-5  # Learning rate
 gamma: 0.99  # Discount factor
 tau: 0.005  # Soft update coefficient
 mismatch_coef: 1.0  # Coefficient for mismatch regularization
@@ -38,4 +38,4 @@ device: "cuda"  # cuda or cpu
 seed: 42
 
 # Output
-output_dir: "iql_mcmc_results"
+output_dir: "mcmc_moiql_results"
