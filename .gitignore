@@ -49,7 +49,7 @@ Thumbs.db
 
 # Others
 moiql_results/
-mcmc_moiql_results/
+moiql_results/
 dst_train/
 highway_train/
 simulation_rl/

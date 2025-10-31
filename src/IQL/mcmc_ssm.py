@@ -190,6 +190,7 @@ class BatchSSM:
                 getattr(self.ssms[0], "initial_variance", 0.1),
                 seed=self.ssm_kwargs.get("seed", 42) + traj_idx * 10000,
             )
+            temp_ssm.reset()  # Initialize SSM state
 
             # Run SSM up to timestep t
             for t in range(min(timestep + 1, len(observations) - 1)):
