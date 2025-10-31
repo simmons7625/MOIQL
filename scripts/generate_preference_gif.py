@@ -15,6 +15,7 @@ def create_preference_gif(
     output_path: str,
     fps: int = 5,
     trajectory_idx: int = 0,
+    figsize: tuple = (6.65, 6.4),
 ):
     """
     Create animated GIF showing preference weights over time.
@@ -24,6 +25,7 @@ def create_preference_gif(
         output_path: Path to save the output GIF
         fps: Frames per second
         trajectory_idx: Which trajectory to visualize (default: first one)
+        figsize: Figure size in inches (width, height) for matching resolution
     """
     # Load trajectories
     with open(trajectories_path, "r") as f:
@@ -46,7 +48,7 @@ def create_preference_gif(
     frames = []
 
     for t in range(n_timesteps):
-        fig, ax = plt.subplots(figsize=(8, 6))
+        fig, ax = plt.subplots(figsize=figsize, dpi=80)
 
         # Plot the full trajectory as lines
         timesteps = np.arange(n_timesteps)
@@ -131,14 +133,31 @@ def main():
         default=0,
         help="Which trajectory to visualize",
     )
+    parser.add_argument(
+        "--width",
+        type=int,
+        default=532,
+        help="Output width in pixels",
+    )
+    parser.add_argument(
+        "--height",
+        type=int,
+        default=512,
+        help="Output height in pixels",
+    )
 
     args = parser.parse_args()
+
+    # Calculate figsize from pixel dimensions (assuming 80 DPI)
+    dpi = 80
+    figsize = (args.width / dpi, args.height / dpi)
 
     create_preference_gif(
         trajectories_path=args.trajectories,
         output_path=args.output,
         fps=args.fps,
         trajectory_idx=args.trajectory_idx,
+        figsize=figsize,
     )
 
 
