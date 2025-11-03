@@ -260,7 +260,7 @@ class StateSpaceModel(ABC):
     """Abstract base class for state space models."""
 
     @abstractmethod
-    def predict(self, observation: np.ndarray, hidden_state: np.ndarray) -> np.ndarray:
+    def predict(self) -> np.ndarray:
         """
         Predict preference weights given observation and action.
 
@@ -388,7 +388,7 @@ class ParticleFilter(StateSpaceModel):
         self.particles = self.particles[indices]
         self.weights = np.ones(self.n_particles) / self.n_particles
 
-    def predict(self, observation: np.ndarray, hidden_state: np.ndarray) -> np.ndarray:
+    def predict(self) -> np.ndarray:
         """
         Predict preference weights (return current estimate).
 
@@ -474,7 +474,7 @@ class ExtendedKalmanFilter(StateSpaceModel):
         self.obs_noise_std = observation_noise
         self._eps = 1e-8
 
-    def predict(self, observation: np.ndarray, hidden_state: np.ndarray) -> np.ndarray:
+    def predict(self) -> np.ndarray:
         """
         Predict preference weights (return current estimate from logits).
 
@@ -664,7 +664,7 @@ class KalmanFilter(StateSpaceModel):
 
         return w_proj
 
-    def predict(self, observation: np.ndarray, hidden_state: np.ndarray) -> np.ndarray:
+    def predict(self) -> np.ndarray:
         """
         Predict preference weights (return current estimate).
 
@@ -764,3 +764,297 @@ class KalmanFilter(StateSpaceModel):
 
         # Observation noise (scalar for mismatch)
         self.R = self.observation_noise**2
+
+
+class GaussianProcessSSM(StateSpaceModel):
+    """
+    Gaussian Process State Space Model for preference weight prediction.
+
+    Uses Gaussian Process regression to model the temporal dynamics of preference weights.
+    The GP captures non-linear temporal correlations and provides uncertainty estimates.
+
+    Model:
+        - State: preference weights w_t ~ simplex
+        - Process: w_t ~ GP(m(t), k(t, t'))
+        - Observation: action selection via softmax(beta * margin(w_t, Q))
+
+    The GP kernel captures temporal smoothness and allows for adaptive noise estimation.
+    """
+
+    def __init__(
+        self,
+        n_objectives: int,
+        length_scale: float = 1.0,
+        signal_variance: float = 1.0,
+        observation_noise: float = 0.1,
+        beta: float = 5.0,
+        max_history: int = 100,
+        kernel_type: str = "rbf",
+        seed: int = 42,
+    ):
+        """
+        Initialize Gaussian Process SSM.
+
+        Args:
+            n_objectives: Number of objectives
+            length_scale: GP kernel length scale (controls temporal smoothness)
+            signal_variance: GP kernel signal variance (controls amplitude)
+            observation_noise: Observation noise for likelihood
+            beta: Temperature parameter for action probability
+            max_history: Maximum number of observations to keep in history
+            kernel_type: Type of kernel ("rbf", "matern32", "matern52")
+            seed: Random seed
+        """
+        self.n_objectives = n_objectives
+        self.length_scale = length_scale
+        self.signal_variance = signal_variance
+        self.observation_noise = observation_noise
+        self.beta = beta
+        self.max_history = max_history
+        self.kernel_type = kernel_type
+        self.rng = np.random.RandomState(seed)
+        self._eps = 1e-8
+
+        # History of observations
+        self.timesteps = []  # List of timestep indices
+        self.observations = []  # List of observations
+        self.actions = []  # List of expert actions
+        self.q_values_history = []  # List of Q-values
+
+        # GP posterior
+        self.mean_weights = None  # Posterior mean [n_objectives]
+        self.cov_weights = None  # Posterior covariance [n_objectives, n_objectives]
+
+        # Current timestep
+        self.t = 0
+
+        self.reset()
+
+    def _kernel(self, t1: np.ndarray, t2: np.ndarray) -> np.ndarray:
+        """
+        Compute kernel matrix between timesteps.
+
+        Args:
+            t1: Timesteps [n1]
+            t2: Timesteps [n2]
+
+        Returns:
+            Kernel matrix [n1, n2]
+        """
+        t1 = np.atleast_1d(t1).reshape(-1, 1)
+        t2 = np.atleast_1d(t2).reshape(-1, 1)
+
+        # Compute pairwise distances
+        dists = np.abs(t1 - t2.T)
+
+        if self.kernel_type == "rbf":
+            # RBF (Gaussian) kernel
+            K = self.signal_variance * np.exp(-0.5 * (dists / self.length_scale) ** 2)
+        elif self.kernel_type == "matern32":
+            # Matérn 3/2 kernel
+            r = np.sqrt(3) * dists / self.length_scale
+            K = self.signal_variance * (1 + r) * np.exp(-r)
+        elif self.kernel_type == "matern52":
+            # Matérn 5/2 kernel
+            r = np.sqrt(5) * dists / self.length_scale
+            K = self.signal_variance * (1 + r + r**2 / 3) * np.exp(-r)
+        else:
+            raise ValueError(f"Unknown kernel type: {self.kernel_type}")
+
+        return K
+
+    def _project_to_simplex(self, w: np.ndarray) -> np.ndarray:
+        """
+        Project weights onto probability simplex.
+
+        Args:
+            w: Weights to project [n_objectives]
+
+        Returns:
+            Projected weights [n_objectives]
+        """
+        # Sort weights in descending order
+        w_sorted = np.sort(w)[::-1]
+        cumsum_w = np.cumsum(w_sorted)
+
+        # Find rho (largest j such that w_j + (1 - cumsum) / (j+1) > 0)
+        rho = None
+        for j in range(self.n_objectives):
+            if w_sorted[j] + (1.0 - cumsum_w[j]) / (j + 1) > 0:
+                rho = j
+
+        if rho is None:
+            # Fallback to uniform
+            return np.ones(self.n_objectives) / self.n_objectives
+
+        # Compute threshold
+        theta = (1.0 - cumsum_w[rho]) / (rho + 1)
+
+        # Project
+        w_proj = np.maximum(w + theta, 0)
+
+        # Normalize to ensure sum to 1
+        w_proj = w_proj / (np.sum(w_proj) + self._eps)
+
+        return w_proj
+
+    def predict(self) -> np.ndarray:
+        """
+        Predict preference weights using GP posterior.
+
+        Args:
+            observation: Current observation (not used in GP prediction)
+            hidden_state: Not used
+
+        Returns:
+            Predicted preference weights [n_objectives]
+        """
+        if self.mean_weights is None:
+            # No observations yet, return uniform prior
+            return np.ones(self.n_objectives) / self.n_objectives
+
+        # Return current posterior mean projected to simplex
+        return self._project_to_simplex(self.mean_weights)
+
+    def update(
+        self,
+        observation: np.ndarray,
+        action: np.ndarray,
+        q_values_all: np.ndarray,
+    ):
+        """
+        Update GP posterior with new observation.
+
+        Uses the expert action as observation to update the GP posterior
+        over preference weights.
+
+        Args:
+            observation: Current observation
+            action: Expert action (discrete)
+            q_values_all: Q-values for all actions [action_dim, n_objectives]
+        """
+        expert_action = int(action)
+
+        # Add to history
+        self.timesteps.append(self.t)
+        self.observations.append(observation)
+        self.actions.append(expert_action)
+        self.q_values_history.append(q_values_all)
+
+        # Trim history if needed
+        if len(self.timesteps) > self.max_history:
+            self.timesteps.pop(0)
+            self.observations.pop(0)
+            self.actions.pop(0)
+            self.q_values_history.pop(0)
+
+        # Update GP posterior
+        n_history = len(self.timesteps)
+
+        if n_history == 1:
+            # First observation: initialize with prior
+            self.mean_weights = np.ones(self.n_objectives) / self.n_objectives
+            self.cov_weights = np.eye(self.n_objectives) * self.signal_variance
+        else:
+            # Perform GP regression for each objective dimension independently
+            history_timesteps = np.array(self.timesteps[:-1])  # Previous timesteps
+            current_timestep = np.array([self.t])  # Current timestep
+
+            # Compute kernels
+            K_hist_hist = self._kernel(history_timesteps, history_timesteps)
+            K_hist_hist += np.eye(len(history_timesteps)) * (
+                self.observation_noise**2 + self._eps
+            )
+
+            K_current_hist = self._kernel(current_timestep, history_timesteps)
+            K_current_current = self._kernel(current_timestep, current_timestep)
+
+            # Compute target weights from previous actions
+            # Find weights that maximize margin for expert action using simple gradient ascent
+            target_weights = []
+            for i, (act, q_vals) in enumerate(
+                zip(self.actions[:-1], self.q_values_history[:-1])
+            ):
+                # Start with normalized expert Q-values
+                expert_q = q_vals[act]
+                expert_q_norm = np.linalg.norm(expert_q) + self._eps
+                w = expert_q / expert_q_norm
+
+                # Simple gradient ascent to maximize margin
+                # margin = max_other_mismatch - expert_mismatch
+                # where mismatch = ||w_normalized - q_normalized||^2
+                n_iters = 10
+                lr = 0.1
+
+                for _ in range(n_iters):
+                    # Normalize current weights
+                    w_norm = np.linalg.norm(w) + self._eps
+                    w_normalized = w / w_norm
+
+                    # Normalize expert Q-values
+                    expert_q_normalized = expert_q / expert_q_norm
+
+                    # Compute max mismatch for other actions
+                    max_other_mismatch = 0
+                    for a in range(q_vals.shape[0]):
+                        if a != act:
+                            q_a = q_vals[a]
+                            q_a_norm = np.linalg.norm(q_a) + self._eps
+                            q_a_normalized = q_a / q_a_norm
+                            mismatch_a = np.sum((w_normalized - q_a_normalized) ** 2)
+                            max_other_mismatch = max(max_other_mismatch, mismatch_a)
+
+                    # Gradient of margin w.r.t w
+                    # margin = max_other_mismatch - expert_mismatch
+                    # ∂margin/∂w = -∂expert_mismatch/∂w (max_other is constant for this gradient step)
+                    # ∂expert_mismatch/∂w = 2(w_normalized - expert_q_normalized) * ∂w_normalized/∂w
+                    grad = -2 * (w_normalized - expert_q_normalized) / w_norm
+
+                    # Update
+                    w = w + lr * grad
+
+                    # Project to simplex
+                    w = self._project_to_simplex(w)
+
+                target_weights.append(w)
+
+            target_weights = np.array(target_weights)  # [n_history-1, n_objectives]
+
+            # GP regression for each dimension
+            new_mean = np.zeros(self.n_objectives)
+            new_cov = np.zeros((self.n_objectives, self.n_objectives))
+
+            try:
+                K_hist_hist_inv = np.linalg.inv(K_hist_hist)
+            except np.linalg.LinAlgError:
+                K_hist_hist_inv = np.linalg.pinv(K_hist_hist)
+
+            for d in range(self.n_objectives):
+                # GP posterior for dimension d
+                y = target_weights[:, d]  # [n_history-1]
+
+                # Posterior mean
+                new_mean[d] = K_current_hist @ K_hist_hist_inv @ y
+
+                # Posterior variance (diagonal only for efficiency)
+                new_cov[d, d] = (
+                    K_current_current
+                    - K_current_hist @ K_hist_hist_inv @ K_current_hist.T
+                )
+
+            self.mean_weights = new_mean
+            self.cov_weights = new_cov + np.eye(self.n_objectives) * self._eps
+
+        self.t += 1
+
+        return None
+
+    def reset(self):
+        """Reset GP-SSM to initial state."""
+        self.timesteps = []
+        self.observations = []
+        self.actions = []
+        self.q_values_history = []
+        self.mean_weights = None
+        self.cov_weights = None
+        self.t = 0

@@ -14,6 +14,7 @@ from typing import Dict
 
 from .actor_critic import ActorCritic
 from .ssm import StateSpaceModel, compute_margin
+from .dataset import create_iql_dataloader
 
 
 class SSMIQTrainer:
@@ -206,121 +207,6 @@ class SSMIQTrainer:
 
         return total_loss
 
-    def update(self, trajectory: Dict) -> Dict[str, float]:
-        """
-        Update Q-network with a single trajectory.
-
-        Processes trajectory sequentially to respect SSM's temporal structure.
-
-        Args:
-            trajectory: Dictionary containing:
-                - observations: [T, obs_dim]
-                - actions: [T]
-                - mo_rewards: [T, n_objectives]
-                - preference_weights: [T, n_objectives]
-
-        Returns:
-            Dictionary of metrics including:
-                - loss: Training loss
-                - preference_mae: Mean absolute error for preference prediction
-                - cross_entropy: Cross-entropy loss (imitation metric)
-        """
-        traj_states = np.array(trajectory["observations"])
-        traj_actions = np.array(trajectory["actions"])
-        traj_prefs = np.array(trajectory["preference_weights"])
-        T = len(traj_states)
-
-        # Reset SSM for this trajectory
-        self.ssm.reset()
-
-        # Initial state info for v_init computation
-        initial_state = traj_states[0]
-        initial_preference = self.ssm.predict(initial_state, None)
-
-        losses = []
-        ssm_losses = []
-        preference_errors = []
-        cross_entropies = []
-
-        for t in range(T - 1):
-            state = traj_states[t]
-            action = traj_actions[t]
-            next_state = traj_states[t + 1]
-            true_preference = traj_prefs[t]
-
-            # Get Q-values for SSM update
-            with torch.no_grad():
-                states = torch.FloatTensor(state).unsqueeze(0).to(self.device)
-                _, q_values_all_batch = self.q_network.act(states)
-                q_values_all = q_values_all_batch[0].cpu().numpy()
-
-            # Update SSM with Q-values (returns loss without backward)
-            ssm_loss = self.ssm.update(
-                observation=state, action=action, q_values_all=q_values_all
-            )
-            if ssm_loss is not None:
-                ssm_losses.append(ssm_loss)
-
-            # Predict preference
-            if hasattr(self.ssm, "hidden"):
-                predicted_preference, _ = self.ssm.predict(state, self.ssm.hidden)
-            else:
-                predicted_preference = self.ssm.predict(state, None)
-
-            # Compute preference MAE
-            pref_error = np.abs(predicted_preference[0] - true_preference[0])
-            preference_errors.append(pref_error)
-
-            # Compute cross-entropy for imitation learning metric
-            with torch.no_grad():
-                state_t = torch.FloatTensor(state).unsqueeze(0).to(self.device)
-                pred_pref_t = (
-                    torch.FloatTensor(predicted_preference).unsqueeze(0).to(self.device)
-                )
-                action_t = torch.LongTensor([action]).to(self.device)
-
-                logits, _ = self.q_network.act(state_t, pred_pref_t)
-
-                ce_loss = torch.nn.functional.cross_entropy(
-                    logits, action_t, reduction="none"
-                )
-                cross_entropies.append(ce_loss.item())
-
-            # Compute training loss
-            loss = self.compute_soft_iq_loss(
-                states=torch.FloatTensor(state).unsqueeze(0).to(self.device),
-                actions=torch.LongTensor([action]).to(self.device),
-                next_states=torch.FloatTensor(next_state).unsqueeze(0).to(self.device),
-                preference_weights=torch.FloatTensor(predicted_preference)
-                .unsqueeze(0)
-                .to(self.device),
-                initial_states=torch.FloatTensor(initial_state)
-                .unsqueeze(0)
-                .to(self.device),
-                initial_preferences=torch.FloatTensor(initial_preference)
-                .unsqueeze(0)
-                .to(self.device),
-            )
-
-            losses.append(loss)
-
-        # Average metrics across trajectory
-        mean_loss = torch.stack(losses).mean()
-
-        # Update Q-network
-        self.q_optimizer.zero_grad()
-        mean_loss.backward()
-        self.q_optimizer.step()
-        self._soft_update()
-
-        metrics = {
-            "loss": mean_loss.item(),
-            "preference_mae": np.mean(preference_errors),
-            "cross_entropy": np.mean(cross_entropies),
-        }
-
-        return metrics
-
     def save(self, path: str):
         """Save model checkpoint."""
         save_path = Path(path)
@@ -413,14 +299,7 @@ class SSMIQTrainer:
                 true_pref = traj_prefs[t]
 
                 # Get predicted preference (before update)
-                if hasattr(self.ssm, "hidden"):
-                    result = self.ssm.predict(state, self.ssm.hidden)
-                    if isinstance(result, tuple):
-                        pred_pref, _ = result
-                    else:
-                        pred_pref = result
-                else:
-                    pred_pref = self.ssm.predict(state, None)
+                pred_pref = self.ssm.predict(state)
 
                 with torch.no_grad():
                     state_t = torch.FloatTensor(state).unsqueeze(0).to(self.device)
@@ -527,3 +406,172 @@ class SSMIQTrainer:
         self.q_network.train()
 
         return results
+
+    def train(self, trajectories: list, batch_size: int = 256) -> Dict[str, float]:
+        """
+        Train for one epoch (batch-based training).
+
+        Process:
+        1. Reset SSM and predict preferences for all trajectories
+        2. Create IQL dataloader from trajectories with predicted preferences
+        3. Update Q-network on batches
+        4. Update SSM with expert actions and Q-values
+
+        Args:
+            trajectories: List of trajectory dictionaries
+            batch_size: Batch size for training
+
+        Returns:
+            Dictionary of metrics for this epoch
+        """
+        epoch_losses = []
+        epoch_preference_errors = []
+        epoch_cross_entropies = []
+
+        # Step 1: Reset SSM and collect predictions for all trajectories
+        all_predicted_prefs = []
+        for traj in trajectories:
+            self.ssm.reset()
+            traj_states = np.array(traj["observations"])
+            traj_prefs = []
+
+            for t in range(len(traj_states)):
+                state = traj_states[t]
+                pred_pref = self.ssm.predict(state)
+                traj_prefs.append(pred_pref)
+
+            all_predicted_prefs.append(np.array(traj_prefs))
+
+        # Step 2: Create dataloader with predicted preferences
+        train_loader = create_iql_dataloader(
+            trajectories=trajectories,
+            predicted_preferences=all_predicted_prefs,
+            batch_size=batch_size,
+            shuffle=True,
+        )
+
+        # Step 3: Update Q-network on batches
+        for batch in train_loader:
+            states = batch["states"].to(self.device)
+            actions = batch["actions"].to(self.device)
+            next_states = batch["next_states"].to(self.device)
+            preference_weights = batch["preference_weights"].to(self.device)
+            initial_states = batch["initial_states"].to(self.device)
+            initial_preferences = batch["initial_preferences"].to(self.device)
+
+            # Compute loss
+            loss = self.compute_soft_iq_loss(
+                states=states,
+                actions=actions,
+                next_states=next_states,
+                preference_weights=preference_weights,
+                initial_states=initial_states,
+                initial_preferences=initial_preferences,
+            )
+
+            # Backward and optimize
+            self.q_optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.q_network.parameters(), max_norm=1.0)
+            self.q_optimizer.step()
+
+            # Soft update target network
+            self._soft_update()
+
+            epoch_losses.append(loss.item())
+
+        # Step 4: Update SSM with expert actions
+        for traj in trajectories:
+            self.ssm.reset()
+            traj_states = np.array(traj["observations"])
+            traj_actions = np.array(traj["actions"])
+            traj_true_prefs = np.array(traj["preference_weights"])
+
+            for t in range(len(traj_states) - 1):
+                state = traj_states[t]
+                action = traj_actions[t]
+                true_pref = traj_true_prefs[t]
+
+                # Get Q-values
+                with torch.no_grad():
+                    state_t = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+                    _, q_values = self.q_network.act(state_t)
+                    q_values_all = q_values.squeeze(0).cpu().numpy()
+
+                # Predict preference
+                pred_pref = self.ssm.predict(state)
+
+                # Compute metrics
+                pref_error = np.mean(np.abs(pred_pref - true_pref))
+                epoch_preference_errors.append(pref_error)
+
+                # Compute cross-entropy
+                with torch.no_grad():
+                    pred_pref_t = (
+                        torch.FloatTensor(pred_pref).unsqueeze(0).to(self.device)
+                    )
+                    action_t = torch.LongTensor([action]).to(self.device)
+                    logits, _ = self.q_network.act(state_t, pred_pref_t)
+                    ce_loss = torch.nn.functional.cross_entropy(
+                        logits, action_t, reduction="none"
+                    )
+                    epoch_cross_entropies.append(ce_loss.item())
+
+                # Update SSM
+                self.ssm.update(
+                    observation=state, action=action, q_values_all=q_values_all
+                )
+
+        return {
+            "loss": np.mean(epoch_losses),
+            "preference_mae": np.mean(epoch_preference_errors),
+            "cross_entropy": np.mean(epoch_cross_entropies),
+        }
+
+    def run(
+        self,
+        trajectories: list,
+        n_epochs: int,
+        batch_size: int = 256,
+        eval_fn=None,
+        eval_interval: int = 10,
+    ) -> list:
+        """
+        Run training for multiple epochs.
+
+        Args:
+            trajectories: List of trajectory dictionaries
+            n_epochs: Number of epochs to train
+            batch_size: Batch size for training
+            eval_fn: Optional evaluation function to call periodically
+            eval_interval: Evaluate every N epochs
+
+        Returns:
+            List of dictionaries containing metrics for each epoch
+        """
+        history = []
+
+        for epoch in range(n_epochs):
+            # Train for one epoch
+            metrics = self.train(trajectories, batch_size=batch_size)
+            metrics["epoch"] = epoch + 1
+
+            history.append(metrics)
+
+            # Print progress
+            if (epoch + 1) % 10 == 0:
+                print(
+                    f"Epoch {epoch + 1}/{n_epochs} - "
+                    f"Loss: {metrics['loss']:.4f}, "
+                    f"Pref MAE: {metrics['preference_mae']:.4f}, "
+                    f"CE: {metrics['cross_entropy']:.4f}"
+                )
+
+            # Evaluate periodically
+            if eval_fn is not None and (epoch + 1) % eval_interval == 0:
+                eval_metrics = eval_fn()
+                print(f"Evaluation at epoch {epoch + 1}:")
+                for key, value in eval_metrics.items():
+                    print(f"  {key}: {value:.4f}")
+
+        return history

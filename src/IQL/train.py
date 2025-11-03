@@ -25,6 +25,7 @@ from src.IQL.ssm import (
     ParticleFilter,
     ExtendedKalmanFilter,
     KalmanFilter,
+    GaussianProcessSSM,
     StateSpaceModel,
 )
 
@@ -145,10 +146,13 @@ def create_ssm(
         "kalman_filter": "kalman_filter",
         "ekf": "extended_kalman_filter",
         "extended_kalman_filter": "extended_kalman_filter",
+        "gp": "gaussian_process",
+        "gaussian_process": "gaussian_process",
+        "gpssm": "gaussian_process",
     }
 
     if ssm_type not in type_mapping:
-        raise ValueError(f"Unsupported SSM type: {ssm_type}. Options: pf, kf, ekf")
+        raise ValueError(f"Unsupported SSM type: {ssm_type}. Options: pf, kf, ekf, gp")
 
     full_type = type_mapping[ssm_type]
 
@@ -176,6 +180,17 @@ def create_ssm(
             observation_noise=ekf_config.get("observation_noise", 0.1),
             initial_variance=ekf_config.get("initial_variance", 0.1),
             beta=ekf_config.get("beta", 5.0),
+        )
+    elif full_type == "gaussian_process":
+        gp_config = config.get("gp", {})
+        ssm = GaussianProcessSSM(
+            n_objectives=n_objectives,
+            length_scale=gp_config.get("length_scale", 1.0),
+            signal_variance=gp_config.get("signal_variance", 1.0),
+            observation_noise=gp_config.get("observation_noise", 0.1),
+            beta=gp_config.get("beta", 5.0),
+            max_history=gp_config.get("max_history", 100),
+            kernel_type=gp_config.get("kernel_type", "rbf"),
         )
     else:
         raise ValueError(f"SSM type '{full_type}' not yet implemented")
@@ -323,11 +338,11 @@ def train(config: Dict[str, Any]):
     print("STARTING TRAINING")
     print("=" * 70)
 
-    n_updates = iql_config.get("n_updates", 10000)
-    n_trajectories = len(expert_trajectories)
+    n_epochs = iql_config.get("n_epochs", 100)
+    batch_size = iql_config.get("batch_size", 256)
 
     # Evaluation settings
-    eval_interval = config.get("eval_interval", 100)
+    eval_interval = config.get("eval_interval", 10)
 
     # Metrics tracking
     import csv
@@ -343,29 +358,21 @@ def train(config: Dict[str, Any]):
     best_eval_score = float("inf")
     best_cross_entropy = None
     best_preference_mae = None
-    best_update = 0
+    best_epoch = 0
     patience_counter = 0
     early_stopping_patience = config.get("early_stopping_patience", 0)
 
-    for update in tqdm(range(n_updates), desc="Training Updates"):
-        # Sample one trajectory randomly
-        traj_idx = np.random.randint(0, n_trajectories)
-        trajectory = expert_trajectories[traj_idx]
-
-        # Update Q-network with this trajectory
-        train_metrics = trainer.update(trajectory)
+    for epoch in tqdm(range(n_epochs), desc="Training Epochs"):
+        # Train for one epoch
+        train_metrics = trainer.train(expert_trajectories, batch_size=batch_size)
 
         # Log training metrics
         train_log = {
-            "update": update + 1,
+            "epoch": epoch + 1,
             "train_loss": train_metrics["loss"],
             "train_preference_mae": train_metrics["preference_mae"],
             "train_cross_entropy": train_metrics["cross_entropy"],
         }
-
-        # Add SSM loss if available
-        if "ssm_loss" in train_metrics:
-            train_log["train_ssm_loss"] = train_metrics["ssm_loss"]
 
         # Save to train CSV
         if train_csv_writer is None:
@@ -386,17 +393,12 @@ def train(config: Dict[str, Any]):
                 "train/preference_mae": train_metrics["preference_mae"],
                 "train/cross_entropy": train_metrics["cross_entropy"],
             }
-
-            # Add SSM loss if available
-            if "ssm_loss" in train_metrics:
-                wandb_log["train/ssm_loss"] = train_metrics["ssm_loss"]
-
-            wandb.log(wandb_log, step=update + 1)
+            wandb.log(wandb_log, step=epoch + 1)
 
         # Evaluate periodically
-        if (update + 1) % eval_interval == 0 or update == 0:
+        if (epoch + 1) % eval_interval == 0 or epoch == 0:
             print(f"\n{'='*70}")
-            print(f"Evaluation at update {update + 1}/{n_updates}")
+            print(f"Evaluation at epoch {epoch + 1}/{n_epochs}")
             print(f"{'='*70}")
 
             # Evaluate preference prediction accuracy on expert trajectories
@@ -410,13 +412,13 @@ def train(config: Dict[str, Any]):
                 expert_dir=str(expert_dir),
                 n_trajectories=config.get("n_trajectories"),
                 save_dir=str(results_dir / "eval_predictions"),
-                update_step=update + 1,
+                update_step=epoch + 1,
                 eval_weights=eval_weights_np,
             )
 
             # Combine metrics
             all_metrics = {
-                "update": update + 1,
+                "epoch": epoch + 1,
                 **eval_metrics,
             }
 
@@ -449,7 +451,7 @@ def train(config: Dict[str, Any]):
                         "std_eval_score"
                     ]
 
-                wandb.log(wandb_log_dict, step=update + 1)
+                wandb.log(wandb_log_dict, step=epoch + 1)
 
             # Save to eval CSV
             if eval_csv_writer is None:
@@ -474,7 +476,7 @@ def train(config: Dict[str, Any]):
                     best_eval_score = current_eval_score
                     best_cross_entropy = current_cross_entropy
                     best_preference_mae = current_preference_mae
-                    best_update = update + 1
+                    best_epoch = epoch + 1
                     patience_counter = 0  # Reset patience counter
 
                     # Save best model
@@ -493,8 +495,8 @@ def train(config: Dict[str, Any]):
                         "best_eval_score": float(best_eval_score),
                         "best_cross_entropy": float(best_cross_entropy),
                         "best_preference_mae": float(best_preference_mae),
-                        "best_update": int(best_update),
-                        "total_updates": n_updates,
+                        "best_epoch": int(best_epoch),
+                        "total_epochs": n_epochs,
                     }
                     best_info_path = results_dir / "best_model_info.json"
                     with open(best_info_path, "w") as f:
@@ -542,7 +544,7 @@ def train(config: Dict[str, Any]):
                 if is_improvement:
                     best_cross_entropy = current_cross_entropy
                     best_preference_mae = current_preference_mae
-                    best_update = update + 1
+                    best_epoch = epoch + 1
                     patience_counter = 0
 
                     best_model_path = results_dir / "best_model.pt"
@@ -557,8 +559,8 @@ def train(config: Dict[str, Any]):
                     best_info = {
                         "best_cross_entropy": float(best_cross_entropy),
                         "best_preference_mae": float(best_preference_mae),
-                        "best_update": int(best_update),
-                        "total_updates": n_updates,
+                        "best_epoch": int(best_epoch),
+                        "total_epochs": n_epochs,
                     }
                     best_info_path = results_dir / "best_model_info.json"
                     with open(best_info_path, "w") as f:
@@ -584,7 +586,7 @@ def train(config: Dict[str, Any]):
                 print(f"\n{'='*70}")
                 print("EARLY STOPPING TRIGGERED")
                 print(f"No improvement for {patience_counter} consecutive evaluations")
-                print(f"Best model was at update {best_update}:")
+                print(f"Best model was at epoch {best_epoch}:")
                 if best_eval_score != float("inf"):
                     print(f"  Eval Score: {best_eval_score:.4f}")
                 if best_cross_entropy is not None:
@@ -603,11 +605,11 @@ def train(config: Dict[str, Any]):
     print("\n" + "=" * 70)
     print("TRAINING COMPLETED")
     if early_stopping_patience > 0 and patience_counter >= early_stopping_patience:
-        print(f"Stopped early after {update + 1} updates (patience exhausted)")
+        print(f"Stopped early after {epoch + 1} epochs (patience exhausted)")
     else:
-        print(f"Completed all {n_updates} updates")
+        print(f"Completed all {n_epochs} epochs")
     print("=" * 70)
-    print(f"\nBest model at update {best_update}:")
+    print(f"\nBest model at epoch {best_epoch}:")
     if best_eval_score != float("inf"):
         print(f"  Eval Score: {best_eval_score:.4f}")
     if best_cross_entropy is not None:
