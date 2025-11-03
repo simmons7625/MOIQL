@@ -9,16 +9,16 @@ n_trajectories: 100  # Number of trajectories to use from expert dataset
 # IQL training configuration
 iql:
   hidden_dim: 256  # Network hidden dimension
-  lr: 1.0e-5  # Learning rate for Q-network
+  lr: 1.0e-4  # Learning rate for Q-network
   gamma: 0.99  # Discount factor
   tau: 0.005  # Soft update coefficient for target network
   mismatch_coef: 10.0  # Coefficient for mismatch regularization term (0 = disabled, SSM handles preference learning)
   
   n_epochs: 100  # Total number of training epochs (batch-based training)
-  batch_size: 256  # Batch size for training
+  batch_size: 64  # Batch size for training
 
 # State Space Model (SSM) for preference prediction
-ssm_type: "gp"  # Options: "pf" (particle filter), "kf" (kalman filter), "ekf" (extended kalman filter), "gp" (gaussian process)
+ssm_type: "pf"  # Options: "pf" (particle filter), "kf" (kalman filter), "ekf" (extended kalman filter), "gp" (gaussian process)
 
 # Particle Filter settings (used if ssm_type == "pf")
 particle_filter:

@@ -24,189 +24,47 @@ Implements three approaches:
 """
 
 import numpy as np
-import torch
 from typing import Optional, Callable
 from abc import ABC, abstractmethod
 
 
-def compute_mismatch(vec1, vec2, eps: float = 1e-8):
+def project_to_simplex(w: np.ndarray, eps: float = 1e-8) -> np.ndarray:
     """
-    Compute mismatch between two vectors (works with both numpy and torch).
+    Project weights onto probability simplex.
 
     Args:
-        vec1: First vector (preference weights)
-        vec2: Second vector (Q-values)
+        w: Weights to project [n_objectives]
         eps: Small constant to avoid division by zero
 
     Returns:
-        Mismatch value(s)
+        Projected weights [n_objectives] summing to 1
     """
-    # Check if inputs are torch tensors
-    if isinstance(vec1, torch.Tensor):
-        vec1_norm = torch.norm(vec1, dim=-1, keepdim=True) + eps
-        vec1_normalized = vec1 / vec1_norm
+    n = len(w)
 
-        vec2_norm = torch.norm(vec2, dim=-1, keepdim=True) + eps
-        vec2_normalized = vec2 / vec2_norm
+    # Sort weights in descending order
+    w_sorted = np.sort(w)[::-1]
+    cumsum_w = np.cumsum(w_sorted)
 
-        # Compute squared L2 distance
-        mismatch = torch.sum((vec1_normalized - vec2_normalized) ** 2, dim=-1)
-    else:
-        # numpy version
-        vec1_norm = np.linalg.norm(vec1, axis=-1, keepdims=True) + eps
-        vec1_normalized = vec1 / vec1_norm
+    # Find rho (largest j such that w_j + (1 - cumsum) / (j+1) > 0)
+    rho = None
+    for j in range(n):
+        if w_sorted[j] + (1.0 - cumsum_w[j]) / (j + 1) > 0:
+            rho = j
 
-        vec2_norm = np.linalg.norm(vec2, axis=-1, keepdims=True) + eps
-        vec2_normalized = vec2 / vec2_norm
+    if rho is None:
+        # Fallback to uniform
+        return np.ones(n) / n
 
-        # Compute squared L2 distance
-        mismatch = np.sum((vec1_normalized - vec2_normalized) ** 2, axis=-1)
+    # Compute threshold
+    theta = (1.0 - cumsum_w[rho]) / (rho + 1)
 
-    return mismatch
+    # Project
+    w_proj = np.maximum(w + theta, 0)
 
+    # Normalize to ensure sum to 1
+    w_proj = w_proj / (np.sum(w_proj) + eps)
 
-def compute_margin_vector(
-    preference: np.ndarray,
-    q_values: np.ndarray,
-    eps: float = 1e-8,
-) -> np.ndarray:
-    """
-    Compute margin for all actions.
-
-    For each action a, compute: margin_a = max_other_mismatch - mismatch(q_a, w)
-    Higher margin means the action is more aligned with the preference than the best alternative.
-
-    This uses max instead of mean to enforce a stricter criterion: each action
-    is compared against the BEST competing action, not the average.
-
-    Args:
-        preference: Preference weights [n_objectives]
-        q_values: Q-values for all actions [action_dim, n_objectives]
-        eps: Small constant to avoid division by zero
-
-    Returns:
-        Margin vector [action_dim]
-    """
-    # Normalize preference
-    pref_norm = np.linalg.norm(preference) + eps
-    pref_normalized = preference / pref_norm
-
-    # Compute mismatch for each action
-    action_dim = q_values.shape[0]
-    mismatches = np.zeros(action_dim)
-
-    for a in range(action_dim):
-        q_val = q_values[a]  # [n_objectives]
-        q_norm = np.linalg.norm(q_val) + eps
-        q_normalized = q_val / q_norm
-
-        # Mismatch = ||w_norm - q_norm||^2
-        mismatch = np.sum((pref_normalized - q_normalized) ** 2)
-        mismatches[a] = mismatch
-
-    # For each action, compute margin relative to best alternative
-    margins = np.zeros(action_dim)
-    for a in range(action_dim):
-        action_mismatch = mismatches[a]
-        other_mask = np.ones(action_dim, dtype=bool)
-        other_mask[a] = False
-        max_other_mismatch = np.max(mismatches[other_mask])
-        margins[a] = max_other_mismatch - action_mismatch
-
-    return margins
-
-
-def compute_margin_objective(
-    preference: np.ndarray,
-    q_values: np.ndarray,
-    expert_action: int,
-    eps: float = 1e-8,
-) -> float:
-    """
-    Compute margin objective for a specific expert action.
-
-    This is a convenience wrapper around compute_margin_vector that returns
-    the margin for a single action.
-
-    Args:
-        preference: Preference weights [n_objectives]
-        q_values: Q-values for all actions [action_dim, n_objectives]
-        expert_action: Expert's chosen action index
-        eps: Small constant to avoid division by zero
-
-    Returns:
-        Margin objective value for expert_action (higher is better)
-    """
-    margins = compute_margin_vector(preference, q_values, eps)
-    return margins[expert_action]
-
-
-def compute_margin(
-    preference_weights: torch.Tensor,
-    q_values_all: torch.Tensor,
-    actions: torch.Tensor,
-    eps: float = 1e-8,
-) -> torch.Tensor:
-    """
-    Compute margin for expert actions (PyTorch version for gradient computation).
-
-    Margin = max_other_mismatch - expert_mismatch
-    Higher margin means expert action is more aligned with preference than the best alternative.
-
-    This uses max instead of mean to enforce a stricter criterion: the expert action
-    must be better than the BEST competing action, not just better than average.
-
-    Args:
-        preference_weights: Preference weights [batch, n_objectives]
-        q_values_all: Q-values for all actions [batch, action_dim, n_objectives]
-        actions: Expert actions [batch]
-        eps: Small constant to avoid division by zero
-
-    Returns:
-        Margins [batch] (higher is better)
-    """
-    batch_size, action_dim, n_objectives = q_values_all.shape
-
-    # Normalize preference weights
-    pref_norm = torch.norm(preference_weights, dim=-1, keepdim=True) + eps
-    pref_normalized = preference_weights / pref_norm  # [batch, n_objectives]
-
-    # Compute mismatch for all actions
-    # q_values_all: [batch, action_dim, n_objectives]
-    q_norm = (
-        torch.norm(q_values_all, dim=-1, keepdim=True) + eps
-    )  # [batch, action_dim, 1]
-    q_normalized = q_values_all / q_norm  # [batch, action_dim, n_objectives]
-
-    # Expand preferences for broadcasting
-    pref_expanded = pref_normalized.unsqueeze(1)  # [batch, 1, n_objectives]
-
-    # Compute mismatch for all actions: ||pref_norm - q_norm||^2
-    mismatches = torch.sum(
-        (pref_expanded - q_normalized) ** 2, dim=-1
-    )  # [batch, action_dim]
-
-    # Get expert mismatch
-    actions_idx = actions.long().unsqueeze(-1)  # [batch, 1]
-    expert_mismatch = torch.gather(mismatches, 1, actions_idx).squeeze(-1)  # [batch]
-
-    # Compute max of other mismatches (excluding expert action)
-    # Create mask for other actions
-    batch_indices = torch.arange(batch_size, device=q_values_all.device)
-    mask = torch.ones_like(mismatches, dtype=torch.bool)  # [batch, action_dim]
-    mask[batch_indices, actions.long()] = False
-
-    # Get maximum mismatch among other actions
-    # Set expert action mismatch to -inf so it's not selected
-    masked_mismatches = mismatches.clone()
-    masked_mismatches[~mask] = float("-inf")
-    max_other_mismatch = torch.max(masked_mismatches, dim=1)[0]  # [batch]
-
-    # Margin = max_other_mismatch - expert_mismatch
-    # Positive margin means expert action has lower mismatch than the best alternative
-    margins = max_other_mismatch - expert_mismatch  # [batch]
-
-    return margins
+    return w_proj
 
 
 def softmax_stable(x: np.ndarray, axis: int = -1) -> np.ndarray:
@@ -392,14 +250,13 @@ class ParticleFilter(StateSpaceModel):
         """
         Predict preference weights (return current estimate).
 
-        Args:
-            observation: Current observation
-            hidden_state: Current hidden state
-
         Returns:
-            Predicted preference weights
+            Predicted preference weights projected to simplex
         """
-        return np.mean(self.particles, axis=0)
+        # Compute weighted mean of particles
+        weighted_mean = np.average(self.particles, axis=0, weights=self.weights)
+        # Project to simplex to ensure valid probability distribution
+        return project_to_simplex(weighted_mean)
 
     def update(
         self,
@@ -410,17 +267,24 @@ class ParticleFilter(StateSpaceModel):
         # Transition particles
         self.particles = self._transition(self.particles)
 
-        # Compute margin objective for each particle
+        # Compute mismatch for each particle (negative because lower is better)
         expert_action = int(action)
-        margins = np.zeros(self.n_particles)
+        expert_q = q_values_all[expert_action]  # [n_objectives]
+        expert_q_norm = np.linalg.norm(expert_q) + 1e-8
+        expert_q_normalized = expert_q / expert_q_norm
 
+        mismatches = np.zeros(self.n_particles)
         for i in range(self.n_particles):
-            margins[i] = compute_margin_objective(
-                self.particles[i], q_values_all, expert_action
-            )
-        # Convert margins to fitness (softmax-like)
-        margins_shifted = margins - np.max(margins)
-        fitness = np.exp(margins_shifted / self.observation_noise)
+            # Normalize particle
+            particle_norm = np.linalg.norm(self.particles[i]) + 1e-8
+            particle_normalized = self.particles[i] / particle_norm
+            # Compute mismatch (squared distance)
+            mismatches[i] = np.sum((particle_normalized - expert_q_normalized) ** 2)
+
+        # Convert mismatches to fitness (negative because we want low mismatch)
+        negative_mismatches = -mismatches  # Higher is better
+        shifted = negative_mismatches - np.max(negative_mismatches)
+        fitness = np.exp(shifted / self.observation_noise)
 
         # Update weights with fitness
         self.weights *= fitness
@@ -431,18 +295,15 @@ class ParticleFilter(StateSpaceModel):
         if ess < self.n_particles / 2:
             self._resample()
 
-        return None
-
 
 class ExtendedKalmanFilter(StateSpaceModel):
     """
-    Extended Kalman Filter for preference weight prediction using margin-based observation model.
+    Extended Kalman Filter for preference weight prediction using mismatch-based observation model.
 
     State representation: logits x in R^n, where w = softmax(x) are the preference weights.
     This ensures weights stay on the probability simplex automatically.
 
-    Observation model: p(a|w) = softmax(beta * margin(w))
-    where margin(w) is computed from Q-values and preferences.
+    Observation model: Directly observes expert action's normalized Q-values as target preference.
     """
 
     def __init__(
@@ -451,7 +312,6 @@ class ExtendedKalmanFilter(StateSpaceModel):
         process_noise: float = 0.01,
         observation_noise: float = 0.1,
         initial_variance: float = 0.1,
-        beta: float = 5.0,
         seed: int = 42,
     ):
         """
@@ -469,7 +329,6 @@ class ExtendedKalmanFilter(StateSpaceModel):
         self.process_noise = process_noise
         self.observation_noise = observation_noise
         self.initial_variance = initial_variance
-        self.beta = beta
         self.rng = np.random.RandomState(seed)
         self.obs_noise_std = observation_noise
         self._eps = 1e-8
@@ -478,54 +337,12 @@ class ExtendedKalmanFilter(StateSpaceModel):
         """
         Predict preference weights (return current estimate from logits).
 
-        Args:
-            observation: Current observation (not used in prediction)
-            hidden_state: Current hidden state (not used in prediction)
-
         Returns:
-            Predicted preference weights = softmax(x)
+            Predicted preference weights projected to simplex
         """
-        return softmax_stable(self.x)
-
-    def _compute_observation_and_jacobian(
-        self, x: np.ndarray, q_values_all: np.ndarray
-    ) -> tuple:
-        """
-        Compute predicted observation h(x) and its Jacobian H.
-
-        h(x) = softmax(beta * margin(softmax(x)))
-
-        Args:
-            x: Logits [n_objectives]
-            q_values_all: Q-values [action_dim, n_objectives]
-
-        Returns:
-            h: Predicted action probabilities [action_dim]
-            H: Jacobian dh/dx [action_dim, n_objectives]
-        """
-        # 1) w = softmax(x) and dw/dx
-        w = softmax_stable(x)  # [n_objectives]
-        S_w = softmax_jacobian(w)  # [n_objectives, n_objectives]
-
-        # 2) margin vector m(w) and dm/dw
-        def margin_fn(weights):
-            return compute_margin_vector(weights, q_values_all, eps=self._eps)
-
-        m = margin_fn(w)  # [action_dim]
-        dm_dw = numeric_jacobian(margin_fn, w, eps=1e-6)  # [action_dim, n_objectives]
-
-        # 3) p = softmax(beta * m) and dp/d(beta*m)
-        u = self.beta * m  # [action_dim]
-        p = softmax_stable(u)  # [action_dim]
-        S_p = softmax_jacobian(p)  # [action_dim, action_dim]
-
-        # Chain: dp/du * beta (since u = beta * m)
-        dp_dm = S_p * self.beta  # [action_dim, action_dim]
-
-        # 4) Full Jacobian: H = dp/dx = dp/dm @ dm/dw @ dw/dx
-        H = dp_dm @ dm_dw @ S_w  # [action_dim, n_objectives]
-
-        return p, H
+        # Use softmax as intermediate step then project to ensure valid simplex
+        w = softmax_stable(self.x)
+        return project_to_simplex(w)
 
     def update(
         self,
@@ -533,29 +350,40 @@ class ExtendedKalmanFilter(StateSpaceModel):
         action: np.ndarray,
         q_values_all: np.ndarray,
     ):
-        expert_action = int(action)
-        action_dim = q_values_all.shape[0]
+        """
+        Update EKF with observation: directly use normalized expert Q-values as target.
 
+        Simpler observation model: z = normalize(Q[expert_action])
+        Predicted observation: h(x) = softmax(x) = w
+        """
+        expert_action = int(action)
+
+        # Process model: x_k = x_{k-1} + process_noise
         x_pred = self.x.copy()
         P_pred = self.P + self.Q
 
-        try:
-            h_pred, H = self._compute_observation_and_jacobian(x_pred, q_values_all)
-        except Exception:
-            self.x = x_pred
-            self.P = P_pred
-            return None
+        # Observation: normalized expert Q-values
+        expert_q = q_values_all[expert_action]  # [n_objectives]
+        expert_q_norm = np.linalg.norm(expert_q) + self._eps
+        z = expert_q / expert_q_norm  # Normalized observation [n_objectives]
 
-        z = np.zeros(action_dim)
-        z[expert_action] = 1.0
+        # Predicted observation: h(x) = softmax(x) = w
+        w_pred = softmax_stable(x_pred)  # [n_objectives]
 
-        R = np.eye(action_dim) * (self.obs_noise_std**2 + self._eps)
+        # Jacobian: H = dw/dx = softmax_jacobian
+        H = softmax_jacobian(w_pred)  # [n_objectives, n_objectives]
 
-        y = z - h_pred
+        # Observation noise
+        R = np.eye(self.n_objectives) * (self.obs_noise_std**2 + self._eps)
 
+        # Innovation
+        y = z - w_pred  # [n_objectives]
+
+        # Innovation covariance
         S = H @ P_pred @ H.T + R
-        S += np.eye(action_dim) * self._eps
+        S += np.eye(self.n_objectives) * self._eps
 
+        # Kalman gain
         try:
             S_inv = np.linalg.inv(S)
         except np.linalg.LinAlgError:
@@ -563,7 +391,11 @@ class ExtendedKalmanFilter(StateSpaceModel):
 
         K = P_pred @ H.T @ S_inv
 
-        self.x = x_pred + K @ y
+        # State update: w = w_pred + K @ y
+        w_updated = w_pred + K @ y
+
+        # Project onto simplex to maintain constraint
+        self.w = w_updated / (np.sum(w_updated) + self._eps)
 
         identity_matrix = np.eye(self.n_objectives)
         IKH = identity_matrix - K @ H
@@ -571,8 +403,6 @@ class ExtendedKalmanFilter(StateSpaceModel):
 
         self.P = (self.P + self.P.T) / 2
         self.P += np.eye(self.n_objectives) * self._eps
-
-        return None
 
     def reset(self):
         """Reset EKF to initial state."""
@@ -623,59 +453,14 @@ class KalmanFilter(StateSpaceModel):
         self.rng = np.random.RandomState(seed)
         self._eps = 1e-8
 
-    def _project_to_simplex(self, w: np.ndarray) -> np.ndarray:
-        """
-        Project weights onto probability simplex using euclidean projection.
-
-        Ensures: w >= 0 and sum(w) = 1
-
-        Args:
-            w: Weights to project [n_objectives]
-
-        Returns:
-            Projected weights [n_objectives]
-        """
-        # Sort weights in descending order
-        w_sorted = np.sort(w)[::-1]
-        cumsum_w = np.cumsum(w_sorted)
-
-        # Find rho (largest j such that w_j + (1 - cumsum) / (j+1) > 0)
-        rho = None
-        for j in range(self.n_objectives):
-            if w_sorted[j] + (1.0 - cumsum_w[j]) / (j + 1) > 0:
-                rho = j
-
-        if rho is None:
-            # Fallback to uniform
-            return np.ones(self.n_objectives) / self.n_objectives
-
-        # Compute threshold
-        theta = (1.0 - cumsum_w[rho]) / (rho + 1)
-
-        # Project
-        w_proj = np.maximum(w + theta, 0)
-
-        # Normalize to ensure sum = 1 (numerical stability)
-        w_sum = np.sum(w_proj)
-        if w_sum > self._eps:
-            w_proj = w_proj / w_sum
-        else:
-            w_proj = np.ones(self.n_objectives) / self.n_objectives
-
-        return w_proj
-
     def predict(self) -> np.ndarray:
         """
         Predict preference weights (return current estimate).
 
-        Args:
-            observation: Current observation (not used in prediction)
-            hidden_state: Current hidden state (not used in prediction)
-
         Returns:
-            Predicted preference weights
+            Predicted preference weights projected to simplex
         """
-        return self.w.copy()
+        return project_to_simplex(self.w).copy()
 
     def update(
         self,
@@ -684,9 +469,9 @@ class KalmanFilter(StateSpaceModel):
         q_values_all: np.ndarray,
     ):
         """
-        Update preference weights using Kalman Filter with linear observation model.
+        Update preference weights using Kalman Filter.
 
-        Observation: margin of expert action compared to others.
+        Observation: normalized expert Q-values as target preference.
 
         Args:
             observation: Current observation (not used)
@@ -703,53 +488,43 @@ class KalmanFilter(StateSpaceModel):
         P_pred = self.P + self.Q
 
         # ===== Update Step =====
-        # Compute expected observation using linear model
-        # H = q_expert - mean(q_other) [n_objectives]
-        # This is the gradient of margin w.r.t. preferences
+        # Observation: normalized expert Q-values
         q_expert = q_values_all[expert_action]  # [n_objectives]
+        q_expert_norm = np.linalg.norm(q_expert) + self._eps
+        z = q_expert / q_expert_norm  # Normalized observation [n_objectives]
 
-        # Mean of other Q-values
-        other_mask = np.ones(q_values_all.shape[0], dtype=bool)
-        other_mask[expert_action] = False
-        q_others = q_values_all[other_mask]  # [action_dim-1, n_objectives]
-        q_mean_other = np.mean(q_others, axis=0)  # [n_objectives]
-
-        # Observation matrix (linear relationship)
-        H = (q_expert - q_mean_other).reshape(1, -1)  # [1, n_objectives]
-
-        # Predicted observation: h_pred = H @ w_pred
-        h_pred = H @ w_pred  # scalar
-
-        # Actual observation: We want expert action to have positive margin
-        # Set target observation = 1 (positive margin)
-        z = 1.0
+        # Observation model is identity: h(w) = w (directly observe preferences)
+        # H = I, so H @ P @ H^T = P and H^T = I
+        h_pred = w_pred
 
         # Innovation (measurement residual)
-        y = z - h_pred  # scalar
+        y = z - h_pred  # [n_objectives]
 
-        # Innovation covariance: S = H @ P_pred @ H^T + R
-        S = (H @ P_pred @ H.T).item() + self.R  # scalar
-        S = max(S, self._eps)  # Ensure positive
+        # Innovation covariance: S = H @ P_pred @ H^T + R = P_pred + R
+        S = P_pred + np.eye(self.n_objectives) * self.R
+        S += np.eye(self.n_objectives) * self._eps
 
-        # Kalman gain: K = P_pred @ H^T @ S^{-1}
-        K = (P_pred @ H.T) / S  # [n_objectives, 1]
-        K = K.flatten()  # [n_objectives]
+        # Kalman gain: K = P_pred @ H^T @ S^{-1} = P_pred @ S^{-1}
+        try:
+            S_inv = np.linalg.inv(S)
+        except np.linalg.LinAlgError:
+            S_inv = np.linalg.pinv(S)
+
+        K = P_pred @ S_inv  # [n_objectives, n_objectives]
 
         # State update: w = w_pred + K @ y
-        w_updated = w_pred + K * y
+        w_updated = w_pred + K @ y
 
         # Project onto simplex to maintain constraint
-        self.w = self._project_to_simplex(w_updated)
+        self.w = project_to_simplex(w_updated)
 
         # Covariance update: P = (I - K @ H) @ P_pred
         identity = np.eye(self.n_objectives)
-        self.P = (identity - np.outer(K, H.flatten())) @ P_pred
+        self.P = (identity - K) @ P_pred
 
         # Ensure symmetry and positive definiteness
         self.P = (self.P + self.P.T) / 2
         self.P += np.eye(self.n_objectives) * self._eps
-
-        return None
 
     def reset(self):
         """Reset KF to initial state."""
@@ -787,8 +562,6 @@ class GaussianProcessSSM(StateSpaceModel):
         length_scale: float = 1.0,
         signal_variance: float = 1.0,
         observation_noise: float = 0.1,
-        beta: float = 5.0,
-        max_history: int = 100,
         kernel_type: str = "rbf",
         seed: int = 42,
     ):
@@ -809,25 +582,9 @@ class GaussianProcessSSM(StateSpaceModel):
         self.length_scale = length_scale
         self.signal_variance = signal_variance
         self.observation_noise = observation_noise
-        self.beta = beta
-        self.max_history = max_history
         self.kernel_type = kernel_type
         self.rng = np.random.RandomState(seed)
         self._eps = 1e-8
-
-        # History of observations
-        self.timesteps = []  # List of timestep indices
-        self.observations = []  # List of observations
-        self.actions = []  # List of expert actions
-        self.q_values_history = []  # List of Q-values
-
-        # GP posterior
-        self.mean_weights = None  # Posterior mean [n_objectives]
-        self.cov_weights = None  # Posterior covariance [n_objectives, n_objectives]
-
-        # Current timestep
-        self.t = 0
-
         self.reset()
 
     def _kernel(self, t1: np.ndarray, t2: np.ndarray) -> np.ndarray:
@@ -863,48 +620,9 @@ class GaussianProcessSSM(StateSpaceModel):
 
         return K
 
-    def _project_to_simplex(self, w: np.ndarray) -> np.ndarray:
-        """
-        Project weights onto probability simplex.
-
-        Args:
-            w: Weights to project [n_objectives]
-
-        Returns:
-            Projected weights [n_objectives]
-        """
-        # Sort weights in descending order
-        w_sorted = np.sort(w)[::-1]
-        cumsum_w = np.cumsum(w_sorted)
-
-        # Find rho (largest j such that w_j + (1 - cumsum) / (j+1) > 0)
-        rho = None
-        for j in range(self.n_objectives):
-            if w_sorted[j] + (1.0 - cumsum_w[j]) / (j + 1) > 0:
-                rho = j
-
-        if rho is None:
-            # Fallback to uniform
-            return np.ones(self.n_objectives) / self.n_objectives
-
-        # Compute threshold
-        theta = (1.0 - cumsum_w[rho]) / (rho + 1)
-
-        # Project
-        w_proj = np.maximum(w + theta, 0)
-
-        # Normalize to ensure sum to 1
-        w_proj = w_proj / (np.sum(w_proj) + self._eps)
-
-        return w_proj
-
     def predict(self) -> np.ndarray:
         """
         Predict preference weights using GP posterior.
-
-        Args:
-            observation: Current observation (not used in GP prediction)
-            hidden_state: Not used
 
         Returns:
             Predicted preference weights [n_objectives]
@@ -914,7 +632,7 @@ class GaussianProcessSSM(StateSpaceModel):
             return np.ones(self.n_objectives) / self.n_objectives
 
         # Return current posterior mean projected to simplex
-        return self._project_to_simplex(self.mean_weights)
+        return project_to_simplex(self.mean_weights)
 
     def update(
         self,
@@ -933,128 +651,77 @@ class GaussianProcessSSM(StateSpaceModel):
             action: Expert action (discrete)
             q_values_all: Q-values for all actions [action_dim, n_objectives]
         """
-        expert_action = int(action)
+        # Compute target weight for current observation
+        expert_q = q_values_all[int(action)]  # [n_objectives]
+        expert_q_norm = np.linalg.norm(expert_q) + self._eps
+        w = expert_q / expert_q_norm
+        target_weight = project_to_simplex(w)
 
-        # Add to history
+        # Store in history
         self.timesteps.append(self.t)
         self.observations.append(observation)
-        self.actions.append(expert_action)
-        self.q_values_history.append(q_values_all)
+        self.actions.append(int(action))
+        self.targets_history.append(target_weight)
+        self.t += 1
 
-        # Trim history if needed
-        if len(self.timesteps) > self.max_history:
-            self.timesteps.pop(0)
-            self.observations.pop(0)
-            self.actions.pop(0)
-            self.q_values_history.pop(0)
-
-        # Update GP posterior
+        # GP regression for each objective dimension independently
         n_history = len(self.timesteps)
 
         if n_history == 1:
-            # First observation: initialize with prior
-            self.mean_weights = np.ones(self.n_objectives) / self.n_objectives
-            self.cov_weights = np.eye(self.n_objectives) * self.signal_variance
-        else:
-            # Perform GP regression for each objective dimension independently
-            history_timesteps = np.array(self.timesteps[:-1])  # Previous timesteps
-            current_timestep = np.array([self.t])  # Current timestep
+            # First observation - just use the target weight
+            self.mean_weights = target_weight.copy()
+            self.cov_weights = np.eye(self.n_objectives) * self.observation_noise**2
+            return
 
-            # Compute kernels
-            K_hist_hist = self._kernel(history_timesteps, history_timesteps)
-            K_hist_hist += np.eye(len(history_timesteps)) * (
-                self.observation_noise**2 + self._eps
-            )
+        # Get all timesteps and target weights
+        all_timesteps = np.array(self.timesteps)  # [n_history]
+        all_targets = np.array(self.targets_history)  # [n_history, n_objectives]
 
-            K_current_hist = self._kernel(current_timestep, history_timesteps)
-            K_current_current = self._kernel(current_timestep, current_timestep)
+        # Compute kernel matrix for all observations
+        K = self._kernel(all_timesteps, all_timesteps)  # [n_history, n_history]
+        K += np.eye(n_history) * (self.observation_noise**2 + self._eps)
 
-            # Compute target weights from previous actions
-            # Find weights that maximize margin for expert action using simple gradient ascent
-            target_weights = []
-            for i, (act, q_vals) in enumerate(
-                zip(self.actions[:-1], self.q_values_history[:-1])
-            ):
-                # Start with normalized expert Q-values
-                expert_q = q_vals[act]
-                expert_q_norm = np.linalg.norm(expert_q) + self._eps
-                w = expert_q / expert_q_norm
+        # Invert kernel matrix
+        try:
+            K_inv = np.linalg.inv(K)
+        except np.linalg.LinAlgError:
+            K_inv = np.linalg.pinv(K)
 
-                # Simple gradient ascent to maximize margin
-                # margin = max_other_mismatch - expert_mismatch
-                # where mismatch = ||w_normalized - q_normalized||^2
-                n_iters = 10
-                lr = 0.1
+        # For prediction at current time, we want the posterior mean
+        # In GP regression: mean = K(t*, t) @ K(t, t)^-1 @ y
+        # Since we just added current observation, we use it directly but smoothed
 
-                for _ in range(n_iters):
-                    # Normalize current weights
-                    w_norm = np.linalg.norm(w) + self._eps
-                    w_normalized = w / w_norm
+        # Compute weights for all history points to predict current
+        current_time = np.array([self.t - 1])  # Current timestep (just added)
+        k_star = self._kernel(current_time, all_timesteps)  # [1, n_history]
 
-                    # Normalize expert Q-values
-                    expert_q_normalized = expert_q / expert_q_norm
+        # GP posterior mean for each dimension
+        self.mean_weights = np.zeros(self.n_objectives)
+        for d in range(self.n_objectives):
+            # Observations for dimension d
+            y = all_targets[:, d]  # [n_history]
 
-                    # Compute max mismatch for other actions
-                    max_other_mismatch = 0
-                    for a in range(q_vals.shape[0]):
-                        if a != act:
-                            q_a = q_vals[a]
-                            q_a_norm = np.linalg.norm(q_a) + self._eps
-                            q_a_normalized = q_a / q_a_norm
-                            mismatch_a = np.sum((w_normalized - q_a_normalized) ** 2)
-                            max_other_mismatch = max(max_other_mismatch, mismatch_a)
+            # Posterior mean: k* @ K^-1 @ y
+            self.mean_weights[d] = (k_star @ K_inv @ y)[0]
 
-                    # Gradient of margin w.r.t w
-                    # margin = max_other_mismatch - expert_mismatch
-                    # ∂margin/∂w = -∂expert_mismatch/∂w (max_other is constant for this gradient step)
-                    # ∂expert_mismatch/∂w = 2(w_normalized - expert_q_normalized) * ∂w_normalized/∂w
-                    grad = -2 * (w_normalized - expert_q_normalized) / w_norm
-
-                    # Update
-                    w = w + lr * grad
-
-                    # Project to simplex
-                    w = self._project_to_simplex(w)
-
-                target_weights.append(w)
-
-            target_weights = np.array(target_weights)  # [n_history-1, n_objectives]
-
-            # GP regression for each dimension
-            new_mean = np.zeros(self.n_objectives)
-            new_cov = np.zeros((self.n_objectives, self.n_objectives))
-
-            try:
-                K_hist_hist_inv = np.linalg.inv(K_hist_hist)
-            except np.linalg.LinAlgError:
-                K_hist_hist_inv = np.linalg.pinv(K_hist_hist)
-
-            for d in range(self.n_objectives):
-                # GP posterior for dimension d
-                y = target_weights[:, d]  # [n_history-1]
-
-                # Posterior mean
-                new_mean[d] = K_current_hist @ K_hist_hist_inv @ y
-
-                # Posterior variance (diagonal only for efficiency)
-                new_cov[d, d] = (
-                    K_current_current
-                    - K_current_hist @ K_hist_hist_inv @ K_current_hist.T
-                )
-
-            self.mean_weights = new_mean
-            self.cov_weights = new_cov + np.eye(self.n_objectives) * self._eps
-
-        self.t += 1
-
-        return None
+        # Posterior covariance (simplified - just keep diagonal)
+        k_star_star = self._kernel(current_time, current_time)[0, 0]
+        posterior_var = k_star_star - k_star @ K_inv @ k_star.T
+        self.cov_weights = np.eye(self.n_objectives) * max(
+            posterior_var[0, 0], self._eps
+        )
 
     def reset(self):
         """Reset GP-SSM to initial state."""
-        self.timesteps = []
-        self.observations = []
-        self.actions = []
-        self.q_values_history = []
-        self.mean_weights = None
-        self.cov_weights = None
+        # History of observations
+        self.timesteps = []  # List of timestep indices
+        self.observations = []  # List of observations
+        self.actions = []  # List of expert actions
+        self.targets_history = []  # List of Q-values
+
+        # GP posterior
+        self.mean_weights = None  # Posterior mean [n_objectives]
+        self.cov_weights = None  # Posterior covariance [n_objectives, n_objectives]
+
+        # Current timestep
         self.t = 0
