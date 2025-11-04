@@ -243,10 +243,10 @@ class SSMIQTrainer:
         )  # [batch]
 
         # Compute update ratio: (improvement) / (current mismatch)
-        mismatch_update_ratio = (mismatch_old - mismatch) / (mismatch + 1e-8)
+        mismatch_update = mismatch_old - mismatch
 
         # Total loss: soft IQ loss + coefficient * mismatch improvement ratio
-        loss = soft_iq_loss + self.mismatch_coef * mismatch_update_ratio.mean()
+        loss = soft_iq_loss + self.mismatch_coef * mismatch_update.mean()
 
         return loss
 
