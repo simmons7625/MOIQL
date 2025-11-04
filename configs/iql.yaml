@@ -4,48 +4,46 @@
 # - Environment name is auto-detected from train_dir path (dst_train -> deep_sea_treasure, highway_train -> mo-highway)
 # - All environment settings are loaded from expert_dir/train_dir/config.yaml
 expert_dir: "simulation_rl/dst_from_1_decay_1e-2/"
-n_trajectories: 100  # Number of trajectories to use from expert dataset
+n_trajectories: 10  # Number of trajectories to use from expert dataset
 
 # IQL training configuration
 iql:
   hidden_dim: 256  # Network hidden dimension
-  lr: 1.0e-4  # Learning rate for Q-network
+  lr: 1.0e-5  # Learning rate for Q-network
   gamma: 0.99  # Discount factor
-  tau: 0.005  # Soft update coefficient for target network
-  mismatch_coef: 10.0  # Coefficient for mismatch regularization term (0 = disabled, SSM handles preference learning)
-  
-  n_epochs: 100  # Total number of training epochs (batch-based training)
-  batch_size: 64  # Batch size for training
+  tau: 0.01  # Soft update coefficient for target network
+  mismatch_coef: 0.1  # Coefficient for mismatch update ratio regularization (0.0 = disable)
+  weight_decay: 0.01  # Weight decay (L2 penalty) for AdamW optimizer
+
+  n_epochs: 10000  # Total number of training epochs (batch-based training)
+  batch_size: 256  # Batch size for training
 
 # State Space Model (SSM) for preference prediction
-ssm_type: "pf"  # Options: "pf" (particle filter), "kf" (kalman filter), "ekf" (extended kalman filter), "gp" (gaussian process)
+ssm_type: "gp"  # Options: "pf" (particle filter), "kf" (kalman filter), "ekf" (extended kalman filter), "gp" (gaussian process)
 
 # Particle Filter settings (used if ssm_type == "pf")
-particle_filter:
+pf:
   n_particles: 1000
-  process_noise: 0.01
-  observation_noise: 0.05
+  process_noise: 0.05
+  observation_noise: 1.0
 
 # Kalman Filter settings (used if ssm_type == "kf")
 kf:
-  process_noise: 0.01
-  observation_noise: 0.05
-  initial_variance: 1.0e+3
+  process_noise: 0.05
+  observation_noise: 1.0
+  initial_variance: 1.0e+4
 
 # Extended Kalman Filter settings (used if ssm_type == "ekf")
 ekf:
   process_noise: 0.05
-  observation_noise: 0.1
-  initial_variance: 1.0e+3
-  beta: 1.0  # Temperature for margin->probability (higher = sharper distribution)
+  observation_noise: 1.0
+  initial_variance: 1.0e+4
 
 # Gaussian Process SSM settings (used if ssm_type == "gp")
 gp:
   length_scale: 1.0  # GP kernel length scale (controls temporal smoothness, lower = more variation)
   signal_variance: 1.0  # GP kernel signal variance (controls amplitude of variations)
-  observation_noise: 0.05  # Observation noise for likelihood
-  beta: 1.0  # Temperature for action probability
-  max_history: 100  # Maximum number of observations to keep in GP history
+  observation_noise: 0.1  # Observation noise for likelihood
   kernel_type: "rbf"  # Kernel type: "rbf" (Gaussian), "matern32", "matern52"
 
 # Device
@@ -55,8 +53,3 @@ device: "cuda"
 use_wandb: false
 wandb_project: "MOIQL"
 save_dir: "moiql_results"
-
-# Evaluation
-eval_interval: 10  # Evaluate every N epochs
-early_stopping_patience: 0  # Stop training if no improvement for N evaluations (0 = disabled)
-eval_weights: [0.5, 0.5]  # Weights [w1, w2] for computing eval_score = w1*cross_entropy + w2*preference_mae

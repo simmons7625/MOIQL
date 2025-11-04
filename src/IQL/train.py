@@ -15,7 +15,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any
 
-import numpy as np
 import wandb
 import yaml
 from tqdm import tqdm
@@ -124,8 +123,7 @@ def load_expert_trajectories(expert_dir: str, n_trajectories: int = None) -> lis
 
     # Sample trajectories if requested
     if n_trajectories is not None and n_trajectories < len(trajectories):
-        indices = np.random.choice(len(trajectories), n_trajectories, replace=False)
-        trajectories = [trajectories[i] for i in indices]
+        trajectories = [trajectories[i] for i in range(n_trajectories)]
         print(f"Sampled {n_trajectories} trajectories from total")
 
     print(f"Loaded {len(trajectories)} trajectories")
@@ -157,7 +155,7 @@ def create_ssm(
     full_type = type_mapping[ssm_type]
 
     if full_type == "particle_filter":
-        pf_config = config.get("particle_filter", {})
+        pf_config = config.get("pf", {})
         ssm = ParticleFilter(
             n_objectives=n_objectives,
             n_particles=pf_config.get("n_particles", 1000),
@@ -179,7 +177,6 @@ def create_ssm(
             process_noise=ekf_config.get("process_noise", 0.01),
             observation_noise=ekf_config.get("observation_noise", 0.1),
             initial_variance=ekf_config.get("initial_variance", 0.1),
-            beta=ekf_config.get("beta", 5.0),
         )
     elif full_type == "gaussian_process":
         gp_config = config.get("gp", {})
@@ -188,8 +185,6 @@ def create_ssm(
             length_scale=gp_config.get("length_scale", 1.0),
             signal_variance=gp_config.get("signal_variance", 1.0),
             observation_noise=gp_config.get("observation_noise", 0.1),
-            beta=gp_config.get("beta", 5.0),
-            max_history=gp_config.get("max_history", 100),
             kernel_type=gp_config.get("kernel_type", "rbf"),
         )
     else:
@@ -265,7 +260,8 @@ def train(config: Dict[str, Any]):
     print(f"Loading expert data from: {expert_dir}")
     expert_config = load_expert_config(str(expert_dir))
     expert_trajectories = load_expert_trajectories(
-        str(expert_dir), n_trajectories=config.get("n_trajectories")
+        str(expert_dir),
+        n_trajectories=config.get("n_trajectories"),
     )
 
     # Get environment name from expert_config (auto-inferred from train_dir path)
@@ -309,7 +305,8 @@ def train(config: Dict[str, Any]):
         lr=iql_config.get("lr", 1e-4),
         gamma=iql_config.get("gamma", 0.99),
         tau=iql_config.get("tau", 0.005),
-        mismatch_coef=iql_config.get("mismatch_coef", 1.0),
+        mismatch_coef=iql_config.get("mismatch_coef", 0.0),
+        weight_decay=iql_config.get("weight_decay", 0.0),
         max_timesteps=config.get("max_timesteps"),
         device=config.get("device", "cuda"),
     )
@@ -341,30 +338,21 @@ def train(config: Dict[str, Any]):
     n_epochs = iql_config.get("n_epochs", 100)
     batch_size = iql_config.get("batch_size", 256)
 
-    # Evaluation settings
-    eval_interval = config.get("eval_interval", 10)
-
     # Metrics tracking
     import csv
 
-    eval_metrics_file = results_dir / "eval_metrics.csv"
     train_metrics_file = results_dir / "train_metrics.csv"
-    eval_csv_writer = None
-    eval_csv_file = None
     train_csv_writer = None
     train_csv_file = None
 
-    # Best model tracking and early stopping
-    best_eval_score = float("inf")
-    best_cross_entropy = None
-    best_preference_mae = None
-    best_epoch = 0
-    patience_counter = 0
-    early_stopping_patience = config.get("early_stopping_patience", 0)
-
+    predicted_prefs = None  # Will be initialized in first epoch
     for epoch in tqdm(range(n_epochs), desc="Training Epochs"):
         # Train for one epoch
-        train_metrics = trainer.train(expert_trajectories, batch_size=batch_size)
+        train_metrics, predicted_prefs = trainer.train(
+            expert_trajectories,
+            batch_size=batch_size,
+            predicted_preferences=predicted_prefs,
+        )
 
         # Log training metrics
         train_log = {
@@ -395,227 +383,14 @@ def train(config: Dict[str, Any]):
             }
             wandb.log(wandb_log, step=epoch + 1)
 
-        # Evaluate periodically
-        if (epoch + 1) % eval_interval == 0 or epoch == 0:
-            print(f"\n{'='*70}")
-            print(f"Evaluation at epoch {epoch + 1}/{n_epochs}")
-            print(f"{'='*70}")
-
-            # Evaluate preference prediction accuracy on expert trajectories
-            eval_weights_config = config.get("eval_weights")
-            eval_weights_np = (
-                np.array(eval_weights_config)
-                if eval_weights_config is not None
-                else None
-            )
-            eval_metrics = trainer.evaluate(
-                expert_dir=str(expert_dir),
-                n_trajectories=config.get("n_trajectories"),
-                save_dir=str(results_dir / "eval_predictions"),
-                update_step=epoch + 1,
-                eval_weights=eval_weights_np,
-            )
-
-            # Combine metrics
-            all_metrics = {
-                "epoch": epoch + 1,
-                **eval_metrics,
-            }
-
-            # Print key metrics
-            print("Evaluation Performance:")
-            print(
-                f"  Preference MAE: {eval_metrics['mean_preference_mae']:.4f} ± {eval_metrics['std_preference_mae']:.4f}"
-            )
-            print(
-                f"  Cross-Entropy (Imitation): {eval_metrics['mean_cross_entropy']:.4f} ± {eval_metrics['std_cross_entropy']:.4f}"
-            )
-            if "mean_eval_score" in eval_metrics:
-                print(
-                    f"  Eval Score (w1*CE + w2*MAE): {eval_metrics['mean_eval_score']:.4f} ± {eval_metrics['std_eval_score']:.4f}"
-                )
-
-            # Log to wandb
-            if config.get("use_wandb", False):
-                wandb_log_dict = {
-                    "eval/preference_mae_mean": eval_metrics["mean_preference_mae"],
-                    "eval/preference_mae_std": eval_metrics["std_preference_mae"],
-                    "eval/cross_entropy_mean": eval_metrics["mean_cross_entropy"],
-                    "eval/cross_entropy_std": eval_metrics["std_cross_entropy"],
-                }
-                if "mean_eval_score" in eval_metrics:
-                    wandb_log_dict["eval/eval_score_mean"] = eval_metrics[
-                        "mean_eval_score"
-                    ]
-                    wandb_log_dict["eval/eval_score_std"] = eval_metrics[
-                        "std_eval_score"
-                    ]
-
-                wandb.log(wandb_log_dict, step=epoch + 1)
-
-            # Save to eval CSV
-            if eval_csv_writer is None:
-                eval_csv_file = open(eval_metrics_file, "w", newline="")
-                fieldnames = list(all_metrics.keys())
-                eval_csv_writer = csv.DictWriter(eval_csv_file, fieldnames=fieldnames)
-                eval_csv_writer.writeheader()
-
-            eval_csv_writer.writerow(all_metrics)
-            eval_csv_file.flush()
-
-            # Check if this is the best model so far based on eval_score
-            current_cross_entropy = eval_metrics["mean_cross_entropy"]
-            current_preference_mae = eval_metrics["mean_preference_mae"]
-
-            # Use eval_score if available, otherwise fall back to combined criteria
-            if "mean_eval_score" in eval_metrics:
-                current_eval_score = eval_metrics["mean_eval_score"]
-                is_improvement = current_eval_score < best_eval_score
-
-                if is_improvement:
-                    best_eval_score = current_eval_score
-                    best_cross_entropy = current_cross_entropy
-                    best_preference_mae = current_preference_mae
-                    best_epoch = epoch + 1
-                    patience_counter = 0  # Reset patience counter
-
-                    # Save best model
-                    best_model_path = results_dir / "best_model.pt"
-                    trainer.save(str(best_model_path))
-                    print(f"\n{'='*70}")
-                    print("NEW BEST MODEL!")
-                    print(f"  Eval Score: {best_eval_score:.4f}")
-                    print(f"  Cross-Entropy: {best_cross_entropy:.4f}")
-                    print(f"  Preference MAE: {best_preference_mae:.4f}")
-                    print(f"Saved to {best_model_path}")
-                    print(f"{'='*70}\n")
-
-                    # Save best model info
-                    best_info = {
-                        "best_eval_score": float(best_eval_score),
-                        "best_cross_entropy": float(best_cross_entropy),
-                        "best_preference_mae": float(best_preference_mae),
-                        "best_epoch": int(best_epoch),
-                        "total_epochs": n_epochs,
-                    }
-                    best_info_path = results_dir / "best_model_info.json"
-                    with open(best_info_path, "w") as f:
-                        json.dump(best_info, f, indent=2)
-                else:
-                    # No improvement
-                    patience_counter += 1
-                    if early_stopping_patience > 0:
-                        print(
-                            f"No improvement for {patience_counter}/{early_stopping_patience} evaluations"
-                        )
-                        print(
-                            f"  Current Eval Score: {current_eval_score:.4f} (CE={current_cross_entropy:.4f}, MAE={current_preference_mae:.4f})"
-                        )
-                        print(
-                            f"  Best Eval Score:    {best_eval_score:.4f} (CE={best_cross_entropy:.4f}, MAE={best_preference_mae:.4f})"
-                        )
-            else:
-                # Fallback: use original logic if eval_score not available
-                cross_entropy_improved = current_cross_entropy < (
-                    best_cross_entropy
-                    if best_cross_entropy is not None
-                    else float("inf")
-                )
-                preference_mae_improved = current_preference_mae < (
-                    best_preference_mae
-                    if best_preference_mae is not None
-                    else float("inf")
-                )
-
-                is_improvement = (
-                    cross_entropy_improved
-                    and (
-                        best_preference_mae is None
-                        or current_preference_mae <= best_preference_mae
-                    )
-                ) or (
-                    preference_mae_improved
-                    and (
-                        best_cross_entropy is None
-                        or current_cross_entropy <= best_cross_entropy
-                    )
-                )
-
-                if is_improvement:
-                    best_cross_entropy = current_cross_entropy
-                    best_preference_mae = current_preference_mae
-                    best_epoch = epoch + 1
-                    patience_counter = 0
-
-                    best_model_path = results_dir / "best_model.pt"
-                    trainer.save(str(best_model_path))
-                    print(f"\n{'='*70}")
-                    print("NEW BEST MODEL!")
-                    print(f"  Cross-Entropy: {best_cross_entropy:.4f}")
-                    print(f"  Preference MAE: {best_preference_mae:.4f}")
-                    print(f"Saved to {best_model_path}")
-                    print(f"{'='*70}\n")
-
-                    best_info = {
-                        "best_cross_entropy": float(best_cross_entropy),
-                        "best_preference_mae": float(best_preference_mae),
-                        "best_epoch": int(best_epoch),
-                        "total_epochs": n_epochs,
-                    }
-                    best_info_path = results_dir / "best_model_info.json"
-                    with open(best_info_path, "w") as f:
-                        json.dump(best_info, f, indent=2)
-                else:
-                    patience_counter += 1
-                    if early_stopping_patience > 0:
-                        print(
-                            f"No improvement for {patience_counter}/{early_stopping_patience} evaluations"
-                        )
-                        print(
-                            f"  Current: CE={current_cross_entropy:.4f}, MAE={current_preference_mae:.4f}"
-                        )
-                        print(
-                            f"  Best:    CE={best_cross_entropy:.4f}, MAE={best_preference_mae:.4f}"
-                        )
-
-            # Check early stopping
-            if (
-                early_stopping_patience > 0
-                and patience_counter >= early_stopping_patience
-            ):
-                print(f"\n{'='*70}")
-                print("EARLY STOPPING TRIGGERED")
-                print(f"No improvement for {patience_counter} consecutive evaluations")
-                print(f"Best model was at epoch {best_epoch}:")
-                if best_eval_score != float("inf"):
-                    print(f"  Eval Score: {best_eval_score:.4f}")
-                if best_cross_entropy is not None:
-                    print(f"  Cross-Entropy: {best_cross_entropy:.4f}")
-                if best_preference_mae is not None:
-                    print(f"  Preference MAE: {best_preference_mae:.4f}")
-                print(f"{'='*70}\n")
-                break
-
     # Close CSV files
     if train_csv_file is not None:
         train_csv_file.close()
-    if eval_csv_file is not None:
-        eval_csv_file.close()
 
-    print("\n" + "=" * 70)
-    print("TRAINING COMPLETED")
-    if early_stopping_patience > 0 and patience_counter >= early_stopping_patience:
-        print(f"Stopped early after {epoch + 1} epochs (patience exhausted)")
-    else:
-        print(f"Completed all {n_epochs} epochs")
-    print("=" * 70)
-    print(f"\nBest model at epoch {best_epoch}:")
-    if best_eval_score != float("inf"):
-        print(f"  Eval Score: {best_eval_score:.4f}")
-    if best_cross_entropy is not None:
-        print(f"  Cross-Entropy: {best_cross_entropy:.4f}")
-    if best_preference_mae is not None:
-        print(f"  Preference MAE: {best_preference_mae:.4f}")
+    # Save final model
+    final_model_path = results_dir / "final_model.pt"
+    trainer.save(str(final_model_path))
+    print(f"\nFinal model saved to: {final_model_path}")
 
     if config.get("use_wandb", False):
         wandb.finish()
