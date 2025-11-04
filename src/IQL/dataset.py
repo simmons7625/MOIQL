@@ -31,10 +31,11 @@ class IQLDataset(torch.utils.data.Dataset):
                 transition = {
                     "state": states[t],
                     "action": actions[t],
+                    "current_preferences": pred_prefs[t],
                     "next_state": states[t + 1],
-                    "preference": pred_prefs[t],
+                    "next_preferences": pred_prefs[t + 1],
                     "initial_state": initial_state,
-                    "initial_preference": initial_pref,
+                    "initial_preferences": initial_pref,
                 }
                 self.transitions.append(transition)
 
@@ -51,14 +52,17 @@ def collate_fn(batch):
         "states": torch.FloatTensor(np.array([t["state"] for t in batch])),
         "actions": torch.LongTensor(np.array([t["action"] for t in batch])),
         "next_states": torch.FloatTensor(np.array([t["next_state"] for t in batch])),
-        "preference_weights": torch.FloatTensor(
-            np.array([t["preference"] for t in batch])
+        "current_preferences": torch.FloatTensor(
+            np.array([t["current_preferences"] for t in batch])
+        ),
+        "next_preferences": torch.FloatTensor(
+            np.array([t["next_preferences"] for t in batch])
         ),
         "initial_states": torch.FloatTensor(
             np.array([t["initial_state"] for t in batch])
         ),
         "initial_preferences": torch.FloatTensor(
-            np.array([t["initial_preference"] for t in batch])
+            np.array([t["initial_preferences"] for t in batch])
         ),
     }
 

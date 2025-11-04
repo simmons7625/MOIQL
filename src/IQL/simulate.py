@@ -260,7 +260,7 @@ def collect_trajectory(
                 else:
                     predicted_pref = result
             else:
-                predicted_pref = trainer.ssm.predict(obs, None)
+                predicted_pref = trainer.ssm.predict()
 
         # Get action from Q-network using predicted preference
         with torch.no_grad():
