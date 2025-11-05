@@ -85,7 +85,7 @@ def load_iql_model(
     ssm_type = training_config.get("ssm_type", "pf")
 
     from src.IQL.trainer import SSMIQTrainer
-    from src.IQL.ssm import ParticleFilter, ExtendedKalmanFilter, KalmanFilter
+    from src.IQL.ssm import ParticleFilter, ExtendedKalmanFilter
 
     # Create SSM based on type
     if ssm_type == "pf":
@@ -95,14 +95,6 @@ def load_iql_model(
             n_particles=pf_config.get("n_particles", 1000),
             process_noise=pf_config.get("process_noise", 0.01),
             observation_noise=pf_config.get("observation_noise", 0.1),
-        )
-    elif ssm_type == "kf":
-        kf_config = training_config.get("kf", {})
-        ssm = KalmanFilter(
-            n_objectives=n_objectives,
-            process_noise=kf_config.get("process_noise", 0.01),
-            observation_noise=kf_config.get("observation_noise", 0.1),
-            initial_variance=kf_config.get("initial_variance", 0.1),
         )
     elif ssm_type == "ekf":
         ekf_config = training_config.get("ekf", {})

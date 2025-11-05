@@ -23,7 +23,6 @@ from src.IQL.trainer import SSMIQTrainer
 from src.IQL.ssm import (
     ParticleFilter,
     ExtendedKalmanFilter,
-    KalmanFilter,
     GaussianProcessSSM,
     StateSpaceModel,
 )
@@ -140,8 +139,6 @@ def create_ssm(
     type_mapping = {
         "pf": "particle_filter",
         "particle_filter": "particle_filter",
-        "kf": "kalman_filter",
-        "kalman_filter": "kalman_filter",
         "ekf": "extended_kalman_filter",
         "extended_kalman_filter": "extended_kalman_filter",
         "gp": "gaussian_process",
@@ -150,7 +147,7 @@ def create_ssm(
     }
 
     if ssm_type not in type_mapping:
-        raise ValueError(f"Unsupported SSM type: {ssm_type}. Options: pf, kf, ekf, gp")
+        raise ValueError(f"Unsupported SSM type: {ssm_type}. Options: pf, ekf, gp")
 
     full_type = type_mapping[ssm_type]
 
@@ -161,14 +158,6 @@ def create_ssm(
             n_particles=pf_config.get("n_particles", 1000),
             process_noise=pf_config.get("process_noise", 0.01),
             observation_noise=pf_config.get("observation_noise", 0.1),
-        )
-    elif full_type == "kalman_filter":
-        kf_config = config.get("kf", {})
-        ssm = KalmanFilter(
-            n_objectives=n_objectives,
-            process_noise=kf_config.get("process_noise", 0.01),
-            observation_noise=kf_config.get("observation_noise", 0.1),
-            initial_variance=kf_config.get("initial_variance", 0.1),
         )
     elif full_type == "extended_kalman_filter":
         ekf_config = config.get("ekf", {})

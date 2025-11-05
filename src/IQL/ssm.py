@@ -27,8 +27,10 @@ import numpy as np
 from typing import Optional, Callable
 from abc import ABC, abstractmethod
 
+EPS = 1e-8
 
-def project_to_simplex(w: np.ndarray, eps: float = 1e-8) -> np.ndarray:
+
+def project_to_simplex(w: np.ndarray, eps: float = EPS) -> np.ndarray:
     """
     Project weights onto probability simplex.
 
@@ -142,9 +144,6 @@ class ParticleFilter(StateSpaceModel):
         self.transition_fn = transition_fn
         self.rng = np.random.RandomState(seed)
 
-        # Initialize particles and weights to uniform distribution
-        self.reset()
-
     def _initialize_particles(self) -> np.ndarray:
         """
         Initialize particles uniformly on probability simplex.
@@ -166,7 +165,7 @@ class ParticleFilter(StateSpaceModel):
         """Project weights onto probability simplex (sum to 1, all positive)."""
         weights = np.maximum(weights, 0)
         weights_sum = np.sum(weights, axis=-1, keepdims=True)
-        weights_sum = np.maximum(weights_sum, 1e-8)  # Avoid division by zero
+        weights_sum = np.maximum(weights_sum, EPS)  # Avoid division by zero
         return weights / weights_sum
 
     def _transition(self, particles: np.ndarray) -> np.ndarray:
@@ -223,12 +222,12 @@ class ParticleFilter(StateSpaceModel):
         # Compute mismatch for each particle (negative because lower is better)
         expert_action = int(action)
         expert_q = q_values_all[expert_action]  # [n_objectives]
-        expert_q_norm = np.linalg.norm(expert_q) + 1e-8
+        expert_q_norm = np.linalg.norm(expert_q) + EPS
         expert_q_normalized = expert_q / expert_q_norm
 
         # Vectorized mismatch computation
         particle_norms = (
-            np.linalg.norm(self.particles, axis=1, keepdims=True) + 1e-8
+            np.linalg.norm(self.particles, axis=1, keepdims=True) + EPS
         )  # [n_particles, 1]
         particles_normalized = (
             self.particles / particle_norms
@@ -238,28 +237,29 @@ class ParticleFilter(StateSpaceModel):
         )  # [n_particles]
 
         # Convert mismatches to fitness (negative because we want low mismatch)
-        negative_mismatches = -mismatches  # Higher is better
-        shifted = negative_mismatches - np.max(negative_mismatches)
-        fitness = np.exp(shifted / self.observation_noise)
+        # z-score normalization
+        mismatches_mean = np.mean(mismatches)
+        mismatches_std = np.std(mismatches) + EPS
+        mismatches = (mismatches - mismatches_mean) / mismatches_std
+        fitness = np.exp(-mismatches / self.observation_noise)
 
         # Update weights with fitness
         self.weights *= fitness
-        self.weights /= np.sum(self.weights) + 1e-8  # Normalize weights
+        self.weights /= np.sum(self.weights) + EPS  # Normalize weights
 
         # Resample if effective sample size is too low
-        # ess = 1.0 / np.sum(self.weights**2)
-        # if ess < 0.5 * self.n_particles:
-        #    self._resample()
+        ess = 1.0 / np.sum(self.weights**2)
+        if ess < 0.5 * self.n_particles:
+            self._resample()
 
 
 class ExtendedKalmanFilter(StateSpaceModel):
     """
     Extended Kalman Filter for preference weight prediction using nonlinear observation model.
 
-    Uses a simpler approach compared to the original EKF:
-    - State representation: preference weights directly (constrained to simplex via projection)
-    - Process model: w_t = w_{t-1} + process_noise (random walk with projection)
-    - Observation model: Nonlinear relationship with Jacobian approximation
+    State representation: logits x in R^n
+    Process model: f(x) = softmax(x) maps logits to simplex
+    Observation model: h(x) = mismatch(softmax(x), q_expert_normalized)
     """
 
     def __init__(
@@ -275,7 +275,7 @@ class ExtendedKalmanFilter(StateSpaceModel):
 
         Args:
             n_objectives: Number of objectives
-            process_noise: Process noise std on preference weights
+            process_noise: Process noise std on logits
             observation_noise: Observation noise std
             initial_variance: Initial covariance diagonal value
             seed: Random seed
@@ -285,16 +285,86 @@ class ExtendedKalmanFilter(StateSpaceModel):
         self.observation_noise = observation_noise
         self.initial_variance = initial_variance
         self.rng = np.random.RandomState(seed)
-        self._eps = 1e-8
+        self._eps = EPS
+
+    def f(self, x: np.ndarray) -> np.ndarray:
+        """
+        Process model: f(x) = softmax(x).
+
+        Maps logits to probability simplex.
+
+        Args:
+            x: Logits [n_objectives]
+
+        Returns:
+            Weights on simplex [n_objectives]
+        """
+        # exp_x = np.exp(x)
+        # return exp_x / (np.sum(exp_x) + self._eps)
+
+        return project_to_simplex(x)
+
+    def h(self, x: np.ndarray, q_expert: np.ndarray) -> np.ndarray:
+        """
+        Observation model: h(x) = mismatch per dimension.
+
+        Computes element-wise squared difference between normalized softmax(x) and normalized q_expert.
+
+        Args:
+            x: Logits [n_objectives]
+            q_expert: Expert Q-values [n_objectives]
+
+        Returns:
+            Mismatch per dimension [n_objectives]
+        """
+        w = self.f(x)  # softmax
+        w_norm = np.linalg.norm(w) + self._eps
+        w_normalized = w / w_norm
+
+        q_norm = np.linalg.norm(q_expert) + self._eps
+        q_normalized = q_expert / q_norm
+
+        # Element-wise squared difference
+        return (w_normalized - q_normalized) ** 2
+
+    def jacobian(self, func, x: np.ndarray, *args) -> np.ndarray:
+        """
+        Compute Jacobian of function numerically using finite differences.
+
+        Args:
+            func: Function to compute Jacobian for
+            x: Input point [n]
+            *args: Additional arguments to func
+            eps: Finite difference step size
+
+        Returns:
+            Jacobian matrix [m, n] where J[i,j] = df_i/dx_j
+        """
+        f0 = func(x, *args)
+        m = len(f0)
+        n = len(x)
+        J = np.zeros((m, n))
+
+        for j in range(n):
+            x_plus = x.copy()
+            x_plus[j] += self._eps
+            f_plus = func(x_plus, *args)
+            J[:, j] = (f_plus - f0) / self._eps
+
+        return J
 
     def predict(self) -> np.ndarray:
         """
-        Predict preference weights (return current estimate).
+        Predict preference weights from current logits.
 
         Returns:
-            Predicted preference weights projected to simplex
+            Predicted preference weights on simplex
         """
-        return project_to_simplex(self.w).copy()
+        F = self.jacobian(self.f, self.x)
+        self.x = self.f(self.x)
+        self.P = F @ self.P @ F.T + self.Q
+
+        return self.x
 
     def update(
         self,
@@ -303,9 +373,7 @@ class ExtendedKalmanFilter(StateSpaceModel):
         q_values_all: np.ndarray,
     ):
         """
-        Update preference weights using Extended Kalman Filter.
-
-        Observation: normalized expert Q-values as target preference.
+        Update EKF with observation using mismatch-based observation model.
 
         Args:
             observation: Current observation (not used)
@@ -314,185 +382,37 @@ class ExtendedKalmanFilter(StateSpaceModel):
         """
         expert_action = int(action)
 
-        # ===== Prediction Step =====
-        # State prediction: w_pred = w (no dynamics, random walk)
-        w_pred = self.w.copy()
-
-        # Covariance prediction: P_pred = P + Q
-        P_pred = self.P + self.Q
-
         # ===== Update Step =====
-        # Observation: normalized expert Q-values
+        # Observation: expert Q-values
         q_expert = q_values_all[expert_action]  # [n_objectives]
-        z = project_to_simplex(q_expert)  # Normalized observation [n_objectives]
 
-        # Innovation (measurement residual)
-        # Goal: minimize mismatch between w_pred_normalized and z
-        # Innovation is the signed difference to move towards lower mismatch
-        w_pred_normalized = project_to_simplex(w_pred)
-        y = z - w_pred_normalized  # [n_objectives] - move towards z to reduce mismatch
+        # Expected observation is zero (no mismatch)
+        z = np.zeros(self.n_objectives)
 
-        # Observation model is identity: h(w) = w (after projection)
-        # Observation noise
-        R = np.eye(self.n_objectives) * (self.observation_noise**2 + self._eps)
+        # Predicted observation: h(x_pred)
+        y_pred = self.h(self.x, q_expert)
 
-        # Innovation covariance: S = P_pred + R (since H = I)
-        S = P_pred + R
-        S += np.eye(self.n_objectives) * self._eps
+        # Jacobian of observation model
+        H = self.jacobian(self.h, self.x, q_expert)  # [n_objectives, n_objectives]
 
-        # Kalman gain: K = P_pred @ S^{-1} (since H = I)
-        try:
-            S_inv = np.linalg.inv(S)
-        except np.linalg.LinAlgError:
-            S_inv = np.linalg.pinv(S)
-
-        K = P_pred @ S_inv  # [n_objectives, n_objectives]
-
-        # State update: w = w_pred + K @ y
-        w_updated = w_pred + K @ y
-
-        # Project onto simplex to maintain constraint
-        self.w = project_to_simplex(w_updated)
-
-        # Covariance update: P = (I - K) @ P_pred (since H = I)
-        identity = np.eye(self.n_objectives)
-        self.P = (identity - K) @ P_pred
-
-        # Ensure symmetry and positive definiteness
-        self.P = (self.P + self.P.T) / 2
-        self.P += np.eye(self.n_objectives) * self._eps
+        S = H @ self.P @ H.T + self.R
+        K = self.P @ H.T @ np.linalg.inv(S)
+        self.x = self.x + K @ (z - y_pred)
+        self.P = (np.eye(self.n_objectives) - K @ H) @ self.P
 
     def reset(self):
         """Reset EKF to initial state."""
-        # Initialize to uniform distribution
-        self.w = np.ones(self.n_objectives) / self.n_objectives
+        # Initialize logits to zero -> uniform weights after softmax
+        self.x = np.zeros(self.n_objectives)
 
         # Covariance matrix [n_objectives, n_objectives]
         self.P = np.eye(self.n_objectives) * self.initial_variance
 
-        # Process noise covariance (random walk on weights)
+        # Process noise covariance (random walk on logits)
         self.Q = np.eye(self.n_objectives) * (self.process_noise**2)
 
-
-class KalmanFilter(StateSpaceModel):
-    """
-    Standard Kalman Filter for preference weight prediction using linear observation model.
-
-    Uses a simpler linear observation model compared to EKF:
-    - State representation: preference weights directly (constrained to simplex via projection)
-    - Process model: w_t = w_{t-1} + process_noise (random walk with projection)
-    - Observation model: Linear relationship between normalized preferences and normalized Q-values
-    """
-
-    def __init__(
-        self,
-        n_objectives: int,
-        process_noise: float = 0.01,
-        observation_noise: float = 0.1,
-        initial_variance: float = 0.1,
-        seed: int = 42,
-    ):
-        """
-        Initialize Kalman Filter.
-
-        Args:
-            n_objectives: Number of objectives
-            process_noise: Process noise std on preference weights
-            observation_noise: Observation noise std
-            initial_variance: Initial covariance diagonal value
-            seed: Random seed
-        """
-        self.n_objectives = n_objectives
-        self.process_noise = process_noise
-        self.observation_noise = observation_noise
-        self.initial_variance = initial_variance
-        self.rng = np.random.RandomState(seed)
-        self._eps = 1e-8
-
-    def predict(self) -> np.ndarray:
-        """
-        Predict preference weights (return current estimate).
-
-        Returns:
-            Predicted preference weights projected to simplex
-        """
-        return project_to_simplex(self.w).copy()
-
-    def update(
-        self,
-        observation: np.ndarray,
-        action: np.ndarray,
-        q_values_all: np.ndarray,
-    ):
-        """
-        Update preference weights using Kalman Filter.
-
-        Observation: normalized expert Q-values as target preference.
-
-        Args:
-            observation: Current observation (not used)
-            action: Expert action (scalar)
-            q_values_all: Q-values for all actions [action_dim, n_objectives]
-        """
-        expert_action = int(action)
-
-        # ===== Prediction Step =====
-        # State prediction: w_pred = w (no dynamics, random walk)
-        w_pred = self.w.copy()
-
-        # Covariance prediction: P_pred = P + Q
-        P_pred = self.P + self.Q
-
-        # ===== Update Step =====
-        # Observation: normalized expert Q-values
-        q_expert = q_values_all[expert_action]  # [n_objectives]
-        z = project_to_simplex(q_expert)  # Normalized observation [n_objectives]
-
-        # Innovation (measurement residual)
-        # Goal: minimize mismatch between w_pred_normalized and z
-        # Innovation is the signed difference to move towards lower mismatch
-        w_pred_normalized = project_to_simplex(w_pred)
-        y = z - w_pred_normalized  # [n_objectives] - move towards z to reduce mismatch
-
-        # Innovation covariance: S = H @ P_pred @ H^T + R = P_pred + R
-        S = P_pred + np.eye(self.n_objectives) * self.R
-        S += np.eye(self.n_objectives) * self._eps
-
-        # Kalman gain: K = P_pred @ H^T @ S^{-1} = P_pred @ S^{-1}
-        try:
-            S_inv = np.linalg.inv(S)
-        except np.linalg.LinAlgError:
-            S_inv = np.linalg.pinv(S)
-
-        K = P_pred @ S_inv  # [n_objectives, n_objectives]
-
-        # State update: w = w_pred + K @ y
-        w_updated = w_pred + K @ y
-
-        # Project onto simplex to maintain constraint
-        self.w = project_to_simplex(w_updated)
-
-        # Covariance update: P = (I - K @ H) @ P_pred
-        identity = np.eye(self.n_objectives)
-        self.P = (identity - K) @ P_pred
-
-        # Ensure symmetry and positive definiteness
-        self.P = (self.P + self.P.T) / 2
-        self.P += np.eye(self.n_objectives) * self._eps
-
-    def reset(self):
-        """Reset KF to initial state."""
-        # Initialize to uniform distribution
-        self.w = np.ones(self.n_objectives) / self.n_objectives
-
-        # Covariance matrix [n_objectives, n_objectives]
-        self.P = np.eye(self.n_objectives) * self.initial_variance
-
-        # Process noise covariance (random walk on weights)
-        self.Q = np.eye(self.n_objectives) * (self.process_noise**2)
-
-        # Observation noise (scalar for mismatch)
-        self.R = self.observation_noise**2
+        # Observation noise covariance
+        self.R = np.eye(self.n_objectives) * (self.observation_noise**2 + self._eps)
 
 
 class GaussianProcessSSM(StateSpaceModel):
@@ -538,7 +458,7 @@ class GaussianProcessSSM(StateSpaceModel):
         self.observation_noise = observation_noise
         self.kernel_type = kernel_type
         self.rng = np.random.RandomState(seed)
-        self._eps = 1e-8
+        self._eps = EPS
         self.reset()
 
     def _kernel(self, t1: np.ndarray, t2: np.ndarray) -> np.ndarray:
