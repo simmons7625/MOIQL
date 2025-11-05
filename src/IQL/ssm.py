@@ -67,53 +67,6 @@ def project_to_simplex(w: np.ndarray, eps: float = 1e-8) -> np.ndarray:
     return w_proj
 
 
-def softmax_stable(x: np.ndarray, axis: int = -1) -> np.ndarray:
-    """Numerically stable softmax."""
-    xm = x - np.max(x, axis=axis, keepdims=True)
-    e = np.exp(xm)
-    return e / np.sum(e, axis=axis, keepdims=True)
-
-
-def softmax_jacobian(s: np.ndarray) -> np.ndarray:
-    """
-    Compute Jacobian of softmax function.
-
-    Args:
-        s: Softmax output [n]
-
-    Returns:
-        Jacobian matrix [n, n] where J[i,j] = ds_i/dx_j
-    """
-    s = s.reshape(-1, 1)
-    return np.diagflat(s.flatten()) - (s @ s.T)
-
-
-def numeric_jacobian(f: Callable, x: np.ndarray, eps: float = 1e-6) -> np.ndarray:
-    """
-    Compute Jacobian numerically using finite differences.
-
-    Args:
-        f: Function that takes x [n] and returns y [m]
-        x: Input point [n]
-        eps: Finite difference step size
-
-    Returns:
-        Jacobian matrix [m, n] where J[i,j] = dy_i/dx_j
-    """
-    y0 = f(x)
-    m = y0.shape[0] if y0.ndim > 0 else 1
-    n = x.shape[0]
-    J = np.zeros((m, n))
-
-    for j in range(n):
-        x_plus = x.copy()
-        x_plus[j] += eps
-        y_plus = f(x_plus)
-        J[:, j] = (y_plus - y0) / eps
-
-    return J
-
-
 class StateSpaceModel(ABC):
     """Abstract base class for state space models."""
 
@@ -273,13 +226,16 @@ class ParticleFilter(StateSpaceModel):
         expert_q_norm = np.linalg.norm(expert_q) + 1e-8
         expert_q_normalized = expert_q / expert_q_norm
 
-        mismatches = np.zeros(self.n_particles)
-        for i in range(self.n_particles):
-            # Normalize particle
-            particle_norm = np.linalg.norm(self.particles[i]) + 1e-8
-            particle_normalized = self.particles[i] / particle_norm
-            # Compute mismatch (squared distance)
-            mismatches[i] = np.sum((particle_normalized - expert_q_normalized) ** 2)
+        # Vectorized mismatch computation
+        particle_norms = (
+            np.linalg.norm(self.particles, axis=1, keepdims=True) + 1e-8
+        )  # [n_particles, 1]
+        particles_normalized = (
+            self.particles / particle_norms
+        )  # [n_particles, n_objectives]
+        mismatches = np.sum(
+            (particles_normalized - expert_q_normalized) ** 2, axis=1
+        )  # [n_particles]
 
         # Convert mismatches to fitness (negative because we want low mismatch)
         negative_mismatches = -mismatches  # Higher is better
@@ -291,19 +247,19 @@ class ParticleFilter(StateSpaceModel):
         self.weights /= np.sum(self.weights) + 1e-8  # Normalize weights
 
         # Resample if effective sample size is too low
-        ess = 1.0 / np.sum(self.weights**2)
-        if ess < self.n_particles / 2:
-            self._resample()
+        # ess = 1.0 / np.sum(self.weights**2)
+        # if ess < 0.5 * self.n_particles:
+        #    self._resample()
 
 
 class ExtendedKalmanFilter(StateSpaceModel):
     """
-    Extended Kalman Filter for preference weight prediction using mismatch-based observation model.
+    Extended Kalman Filter for preference weight prediction using nonlinear observation model.
 
-    State representation: logits x in R^n, where w = softmax(x) are the preference weights.
-    This ensures weights stay on the probability simplex automatically.
-
-    Observation model: Directly observes expert action's normalized Q-values as target preference.
+    Uses a simpler approach compared to the original EKF:
+    - State representation: preference weights directly (constrained to simplex via projection)
+    - Process model: w_t = w_{t-1} + process_noise (random walk with projection)
+    - Observation model: Nonlinear relationship with Jacobian approximation
     """
 
     def __init__(
@@ -319,10 +275,9 @@ class ExtendedKalmanFilter(StateSpaceModel):
 
         Args:
             n_objectives: Number of objectives
-            process_noise: Process noise std on logits
+            process_noise: Process noise std on preference weights
             observation_noise: Observation noise std
-            initial_variance: Initial covariance diagonal value for logits
-            beta: Temperature parameter for margin->probability (higher = sharper)
+            initial_variance: Initial covariance diagonal value
             seed: Random seed
         """
         self.n_objectives = n_objectives
@@ -330,19 +285,16 @@ class ExtendedKalmanFilter(StateSpaceModel):
         self.observation_noise = observation_noise
         self.initial_variance = initial_variance
         self.rng = np.random.RandomState(seed)
-        self.obs_noise_std = observation_noise
         self._eps = 1e-8
 
     def predict(self) -> np.ndarray:
         """
-        Predict preference weights (return current estimate from logits).
+        Predict preference weights (return current estimate).
 
         Returns:
             Predicted preference weights projected to simplex
         """
-        # Use softmax as intermediate step then project to ensure valid simplex
-        w = softmax_stable(self.x)
-        return project_to_simplex(w)
+        return project_to_simplex(self.w).copy()
 
     def update(
         self,
@@ -351,68 +303,74 @@ class ExtendedKalmanFilter(StateSpaceModel):
         q_values_all: np.ndarray,
     ):
         """
-        Update EKF with observation: directly use normalized expert Q-values as target.
+        Update preference weights using Extended Kalman Filter.
 
-        Simpler observation model: z = normalize(Q[expert_action])
-        Predicted observation: h(x) = softmax(x) = w
+        Observation: normalized expert Q-values as target preference.
+
+        Args:
+            observation: Current observation (not used)
+            action: Expert action (scalar)
+            q_values_all: Q-values for all actions [action_dim, n_objectives]
         """
         expert_action = int(action)
 
-        # Process model: x_k = x_{k-1} + process_noise
-        x_pred = self.x.copy()
+        # ===== Prediction Step =====
+        # State prediction: w_pred = w (no dynamics, random walk)
+        w_pred = self.w.copy()
+
+        # Covariance prediction: P_pred = P + Q
         P_pred = self.P + self.Q
 
+        # ===== Update Step =====
         # Observation: normalized expert Q-values
-        expert_q = q_values_all[expert_action]  # [n_objectives]
-        expert_q_norm = np.linalg.norm(expert_q) + self._eps
-        z = expert_q / expert_q_norm  # Normalized observation [n_objectives]
+        q_expert = q_values_all[expert_action]  # [n_objectives]
+        z = project_to_simplex(q_expert)  # Normalized observation [n_objectives]
 
-        # Predicted observation: h(x) = softmax(x) = w
-        w_pred = softmax_stable(x_pred)  # [n_objectives]
+        # Innovation (measurement residual)
+        # Goal: minimize mismatch between w_pred_normalized and z
+        # Innovation is the signed difference to move towards lower mismatch
+        w_pred_normalized = project_to_simplex(w_pred)
+        y = z - w_pred_normalized  # [n_objectives] - move towards z to reduce mismatch
 
-        # Jacobian: H = dw/dx = softmax_jacobian
-        H = softmax_jacobian(w_pred)  # [n_objectives, n_objectives]
-
+        # Observation model is identity: h(w) = w (after projection)
         # Observation noise
-        R = np.eye(self.n_objectives) * (self.obs_noise_std**2 + self._eps)
+        R = np.eye(self.n_objectives) * (self.observation_noise**2 + self._eps)
 
-        # Innovation
-        y = z - w_pred  # [n_objectives]
-
-        # Innovation covariance
-        S = H @ P_pred @ H.T + R
+        # Innovation covariance: S = P_pred + R (since H = I)
+        S = P_pred + R
         S += np.eye(self.n_objectives) * self._eps
 
-        # Kalman gain
+        # Kalman gain: K = P_pred @ S^{-1} (since H = I)
         try:
             S_inv = np.linalg.inv(S)
         except np.linalg.LinAlgError:
             S_inv = np.linalg.pinv(S)
 
-        K = P_pred @ H.T @ S_inv
+        K = P_pred @ S_inv  # [n_objectives, n_objectives]
 
         # State update: w = w_pred + K @ y
         w_updated = w_pred + K @ y
 
         # Project onto simplex to maintain constraint
-        self.w = w_updated / (np.sum(w_updated) + self._eps)
+        self.w = project_to_simplex(w_updated)
 
-        identity_matrix = np.eye(self.n_objectives)
-        IKH = identity_matrix - K @ H
-        self.P = IKH @ P_pred @ IKH.T + K @ R @ K.T
+        # Covariance update: P = (I - K) @ P_pred (since H = I)
+        identity = np.eye(self.n_objectives)
+        self.P = (identity - K) @ P_pred
 
+        # Ensure symmetry and positive definiteness
         self.P = (self.P + self.P.T) / 2
         self.P += np.eye(self.n_objectives) * self._eps
 
     def reset(self):
         """Reset EKF to initial state."""
-        # Initialize to zero -> uniform weights after softmax
-        self.x = np.zeros(self.n_objectives)
+        # Initialize to uniform distribution
+        self.w = np.ones(self.n_objectives) / self.n_objectives
 
         # Covariance matrix [n_objectives, n_objectives]
         self.P = np.eye(self.n_objectives) * self.initial_variance
 
-        # Process noise covariance (random walk on logits)
+        # Process noise covariance (random walk on weights)
         self.Q = np.eye(self.n_objectives) * (self.process_noise**2)
 
 
@@ -423,9 +381,7 @@ class KalmanFilter(StateSpaceModel):
     Uses a simpler linear observation model compared to EKF:
     - State representation: preference weights directly (constrained to simplex via projection)
     - Process model: w_t = w_{t-1} + process_noise (random walk with projection)
-    - Observation model: Linear relationship between preference weights and observed margin
-
-    This is simpler and faster than EKF but assumes linearity in the observation.
+    - Observation model: Linear relationship between normalized preferences and normalized Q-values
     """
 
     def __init__(
@@ -490,15 +446,13 @@ class KalmanFilter(StateSpaceModel):
         # ===== Update Step =====
         # Observation: normalized expert Q-values
         q_expert = q_values_all[expert_action]  # [n_objectives]
-        q_expert_norm = np.linalg.norm(q_expert) + self._eps
-        z = q_expert / q_expert_norm  # Normalized observation [n_objectives]
-
-        # Observation model is identity: h(w) = w (directly observe preferences)
-        # H = I, so H @ P @ H^T = P and H^T = I
-        h_pred = w_pred
+        z = project_to_simplex(q_expert)  # Normalized observation [n_objectives]
 
         # Innovation (measurement residual)
-        y = z - h_pred  # [n_objectives]
+        # Goal: minimize mismatch between w_pred_normalized and z
+        # Innovation is the signed difference to move towards lower mismatch
+        w_pred_normalized = project_to_simplex(w_pred)
+        y = z - w_pred_normalized  # [n_objectives] - move towards z to reduce mismatch
 
         # Innovation covariance: S = H @ P_pred @ H^T + R = P_pred + R
         S = P_pred + np.eye(self.n_objectives) * self.R

@@ -1,6 +1,3 @@
-*.csv
-*.png
-
 # Python
 __pycache__/
 *.py[cod]
@@ -48,10 +45,10 @@ data/
 Thumbs.db
 
 # Others
-moiql_results/
+# moiql_results/
 dst_train/
 highway_train/
 simulation_rl/
-simulation_iql/
+#simulation_iql/
 paper/
 tex temprate for paper/

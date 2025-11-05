@@ -169,22 +169,6 @@ class SSMIQTrainer:
         )  # [batch, n_objectives]
 
         with torch.no_grad():
-            # ===== Compute Q(s, a) from target network =====
-            _, q_all_actions_target = self.q_target.act(
-                states
-            )  # [batch, action_dim, n_objectives]
-
-            # Get Q(s, a) for taken actions from target network
-            actions_idx_target = (
-                actions.long().unsqueeze(-1).unsqueeze(-1)
-            )  # [batch, 1, 1]
-            actions_idx_target = actions_idx_target.expand(
-                -1, -1, self.n_objectives
-            )  # [batch, 1, n_objectives]
-            q_current_old = q_all_actions_target.gather(1, actions_idx_target).squeeze(
-                1
-            )  # [batch, n_objectives]
-
             # ===== Compute v_init = E_{a~π}[Q(s_0, a)] =====
             # Compute Q-values for initial states: [batch, action_dim, n_objectives]
             _, q_init_all_actions = self.q_target.act(
@@ -207,7 +191,7 @@ class SSMIQTrainer:
 
             # Expectation over policy: V(s') = E_{a~π}[Q(s', a)]
             # For objective-dimensional Q, we compute scalar Q using preference weights
-            # q_scalar = preference^T * q_objectives
+            # q_scalar = preference^T * q_objectivesmoiql_results/20251105_155332
             q_next_scalar = torch.einsum(
                 "bao,bo->ba", q_next_all, next_preferences
             )  # [batch, action_dim]
@@ -219,9 +203,7 @@ class SSMIQTrainer:
 
         # Soft IQ loss: -(Q(s,a) - gamma * V(s')) + (1 - gamma) * V(s_0)
         # where V(s) = E_{a~π(·|s)}[Q(s,a)] = Σ_a π(a|s) * Q(s,a)
-        soft_iq_loss = (
-            -(q_expert - self.gamma * v_next) + (1 - self.gamma) * v_init
-        ).mean()
+        soft_iq_loss = -(q_expert - self.gamma * v_next) + (1 - self.gamma) * v_init
 
         # Compute mismatch regularization term
         # Normalize both to unit vectors for comparison
@@ -230,25 +212,14 @@ class SSMIQTrainer:
             torch.norm(current_preferences, dim=1, keepdim=True) + 1e-8
         )
         # Compute mismatch (MSE between normalized vectors)
-        mismatch = torch.sum(
+        mismatch_loss = torch.sum(
             (q_current_norm - current_preferences_norm) ** 2, dim=1
         )  # [batch]
 
-        # Compute mismatch_old using target network
-        q_current_old_norm = q_current_old / (
-            torch.norm(q_current_old, dim=1, keepdim=True) + 1e-8
-        )
-        mismatch_old = torch.sum(
-            (q_current_old_norm - current_preferences_norm) ** 2, dim=1
-        )  # [batch]
-
-        # Compute update ratio: (improvement) / (current mismatch)
-        mismatch_update = mismatch_old - mismatch
-
         # Total loss: soft IQ loss + coefficient * mismatch improvement ratio
-        loss = soft_iq_loss + self.mismatch_coef * mismatch_update.mean()
+        loss = soft_iq_loss + self.mismatch_coef * mismatch_loss
 
-        return loss
+        return loss.mean()
 
     def _ssm_rollout(
         self,

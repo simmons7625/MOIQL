@@ -345,6 +345,10 @@ def train(config: Dict[str, Any]):
     train_csv_writer = None
     train_csv_file = None
 
+    # Track best cross-entropy for model saving
+    best_cross_entropy = float("inf")
+    best_model_path = results_dir / "best_model.pt"
+
     predicted_prefs = None  # Will be initialized in first epoch
     for epoch in tqdm(range(n_epochs), desc="Training Epochs"):
         # Train for one epoch
@@ -374,12 +378,19 @@ def train(config: Dict[str, Any]):
         train_csv_writer.writerow(train_log)
         train_csv_file.flush()
 
+        # Save model if cross-entropy improved
+        current_cross_entropy = train_metrics["cross_entropy"]
+        if current_cross_entropy < best_cross_entropy:
+            best_cross_entropy = current_cross_entropy
+            trainer.save(str(best_model_path))
+
         # Log to wandb
         if config.get("use_wandb", False):
             wandb_log = {
                 "train/loss": train_metrics["loss"],
                 "train/preference_mae": train_metrics["preference_mae"],
                 "train/cross_entropy": train_metrics["cross_entropy"],
+                "train/best_cross_entropy": best_cross_entropy,
             }
             wandb.log(wandb_log, step=epoch + 1)
 
@@ -391,6 +402,9 @@ def train(config: Dict[str, Any]):
     final_model_path = results_dir / "final_model.pt"
     trainer.save(str(final_model_path))
     print(f"\nFinal model saved to: {final_model_path}")
+    print(
+        f"Best model (cross-entropy={best_cross_entropy:.6f}) saved to: {best_model_path}"
+    )
 
     if config.get("use_wandb", False):
         wandb.finish()
