@@ -11,7 +11,11 @@ For preference weight estimation:
     g: mismatch margin function
 
 Mismatch margin function:
+<<<<<<< HEAD
+    margin = mean(mismatch(preference, q_others)) - mismatch(preference, q_expert)
+=======
     margin = mismatch(preference, q_expert) - mean(mismatch(preference, q_others))
+>>>>>>> cff41faf3b3f3017f2e739027b7aa38887dbd1ff
     where mismatch = ||preference/|preference| - q/|q|||^2
 
 Where:
@@ -19,7 +23,11 @@ Where:
     - q_expert: Q-values for expert action
     - q_others: Q-values for all other actions
 
+<<<<<<< HEAD
+The margin is positive when the expert action is better aligned with the preference.
+=======
 The margin is negative when the expert action is better aligned with the preference.
+>>>>>>> cff41faf3b3f3017f2e739027b7aa38887dbd1ff
 
 Implements three approaches:
 1. Particle Filter: Non-parametric sequential Monte Carlo
@@ -267,36 +275,44 @@ class ParticleFilter(StateSpaceModel):
             (particles_normalized - expert_q_normalized) ** 2, axis=1
         )  # [n_particles]
 
-        # Compute mean mismatch with other actions for each particle
+        # Compute mean mismatch with other actions for each particle (vectorized)
         n_actions = q_values_all.shape[0]
-        other_mismatches_sum = np.zeros(self.n_particles)
 
-        for a in range(n_actions):
-            if a != expert_action:
-                q_a = q_values_all[a]  # [n_objectives]
-                q_a_norm = np.linalg.norm(q_a) + EPS
-                q_a_normalized = q_a / q_a_norm
+        # Normalize all Q-values [n_actions, n_objectives]
+        q_norms = (
+            np.linalg.norm(q_values_all, axis=1, keepdims=True) + EPS
+        )  # [n_actions, 1]
+        q_normalized_all = q_values_all / q_norms  # [n_actions, n_objectives]
 
-                # Compute mismatch with action a for each particle
-                mismatches_a = np.sum(
-                    (particles_normalized - q_a_normalized) ** 2, axis=1
-                )  # [n_particles]
-                other_mismatches_sum += mismatches_a
+        # Compute mismatch for all actions and all particles
+        # particles_normalized: [n_particles, n_objectives]
+        # q_normalized_all: [n_actions, n_objectives]
+        # Expand dimensions for broadcasting: [n_particles, 1, n_objectives] - [1, n_actions, n_objectives]
+        diff = (
+            particles_normalized[:, np.newaxis, :] - q_normalized_all[np.newaxis, :, :]
+        )  # [n_particles, n_actions, n_objectives]
+        all_mismatches = np.sum(diff**2, axis=2)  # [n_particles, n_actions]
+
+        # Create mask for other actions (exclude expert)
+        mask = np.ones(n_actions, dtype=bool)
+        mask[expert_action] = False
 
         # Mean over other actions
-        other_mismatches_mean = other_mismatches_sum / (n_actions - 1)
+        other_mismatches_mean = np.mean(
+            all_mismatches[:, mask], axis=1
+        )  # [n_particles]
 
-        # Mismatch margin: negative margin means expert is better aligned
-        # We want to maximize: other_mismatches_mean - expert_mismatches
-        # Which is equivalent to minimizing: expert_mismatches - other_mismatches_mean
-        mismatch_margins = expert_mismatches - other_mismatches_mean  # [n_particles]
+        # Mismatch margin: positive margin means expert is better aligned
+        # margin = mean(mismatch(others)) - mismatch(expert)
+        # Higher margin is better (expert has lower mismatch than others)
+        mismatch_margins = other_mismatches_mean - expert_mismatches  # [n_particles]
 
-        # Convert margins to fitness (lower margin is better, so negate)
+        # Convert margins to fitness (higher margin is better)
         # z-score normalization
         margins_mean = np.mean(mismatch_margins)
         margins_std = np.std(mismatch_margins) + EPS
         mismatch_margins = (mismatch_margins - margins_mean) / margins_std
-        fitness = np.exp(-mismatch_margins / self.observation_noise)
+        fitness = np.exp(mismatch_margins / self.observation_noise)
 
         # Update weights with fitness
         self.weights *= fitness
@@ -363,7 +379,7 @@ class ExtendedKalmanFilter(StateSpaceModel):
         """
         Observation model: h(x) = mismatch margin (scalar).
 
-        Computes mismatch(preference, q_expert) - mean(mismatch(preference, q_others))
+        Computes mean(mismatch(preference, q_others)) - mismatch(preference, q_expert)
 
         Args:
             x: Logits [n_objectives]
@@ -371,7 +387,7 @@ class ExtendedKalmanFilter(StateSpaceModel):
             q_values_all: All Q-values [n_actions, n_objectives]
 
         Returns:
-            Mismatch margin (scalar)
+            Mismatch margin (scalar) - positive when expert is better aligned
         """
         w = self.f(x)  # softmax to get preference weights
         w_norm = np.linalg.norm(w) + self._eps
@@ -382,28 +398,37 @@ class ExtendedKalmanFilter(StateSpaceModel):
         q_expert_normalized = q_expert / q_expert_norm
         expert_mismatch = np.sum((w_normalized - q_expert_normalized) ** 2)
 
-        # Compute mean mismatch with other actions
+        # Compute mean mismatch with other actions (vectorized)
         n_actions = q_values_all.shape[0]
-        other_mismatches = []
 
-        for a in range(n_actions):
-            q_a = q_values_all[a]
-            # Check if this is the expert action (skip if so)
-            if np.allclose(q_a, q_expert):
-                continue
+        # Normalize all Q-values [n_actions, n_objectives]
+        q_norms = (
+            np.linalg.norm(q_values_all, axis=1, keepdims=True) + self._eps
+        )  # [n_actions, 1]
+        q_normalized_all = q_values_all / q_norms  # [n_actions, n_objectives]
 
-            q_a_norm = np.linalg.norm(q_a) + self._eps
-            q_a_normalized = q_a / q_a_norm
-            mismatch_a = np.sum((w_normalized - q_a_normalized) ** 2)
-            other_mismatches.append(mismatch_a)
+        # Compute mismatch for all actions
+        # w_normalized: [n_objectives]
+        # q_normalized_all: [n_actions, n_objectives]
+        diff = (
+            w_normalized[np.newaxis, :] - q_normalized_all
+        )  # [n_actions, n_objectives]
+        all_mismatches = np.sum(diff**2, axis=1)  # [n_actions]
 
-        if len(other_mismatches) > 0:
-            other_mismatch_mean = np.mean(other_mismatches)
+        # Create mask for other actions (exclude expert)
+        mask = np.ones(n_actions, dtype=bool)
+        mask[
+            np.argmin(np.linalg.norm(q_normalized_all - q_expert_normalized, axis=1))
+        ] = False
+
+        # Mean over other actions
+        if np.sum(mask) > 0:
+            other_mismatch_mean = np.mean(all_mismatches[mask])
         else:
             other_mismatch_mean = 0.0
 
-        # Return margin (we want this to be small/negative)
-        return expert_mismatch - other_mismatch_mean
+        # Return margin (higher is better - expert has lower mismatch than others)
+        return other_mismatch_mean - expert_mismatch
 
     def jacobian(self, func, x: np.ndarray, *args) -> np.ndarray:
         """
@@ -474,10 +499,9 @@ class ExtendedKalmanFilter(StateSpaceModel):
         # Observation: expert Q-values
         q_expert = q_values_all[expert_action]  # [n_objectives]
 
-        # Expected observation is zero or negative (expert should have lower mismatch)
-        z = np.array(
-            [0.0]
-        )  # Target margin is 0 (expert is as good as or better than others)
+        # Expected observation should be positive (expert should have lower mismatch than others)
+        # We use 0 as target but in practice positive margins are good
+        z = np.array([0.0])  # Target margin baseline
 
         # Predicted observation: h(x_pred) returns scalar margin
         y_pred = np.array([self.h(self.x, q_expert, q_values_all)])

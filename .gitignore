@@ -23,7 +23,7 @@ env/
 
 # Jupyter
 .ipynb_checkpoints/
-*.ipynb
+# *.ipynb
 
 # Model checkpoints
 checkpoints/

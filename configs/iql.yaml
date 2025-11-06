@@ -19,7 +19,7 @@ iql:
   batch_size: 256  # Batch size for training
 
 # State Space Model (SSM) for preference prediction
-ssm_type: "pf"  # Options: "pf" (particle filter), "ekf" (extended kalman filter), "gp" (gaussian process)
+ssm_type: "ekf"  # Options: "pf" (particle filter), "ekf" (extended kalman filter), "gp" (gaussian process)
 
 # Particle Filter settings (used if ssm_type == "pf")
 pf:
