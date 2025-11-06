@@ -11,7 +11,11 @@ For preference weight estimation:
     g: mismatch margin function
 
 Mismatch margin function:
+<<<<<<< HEAD
     margin = mean(mismatch(preference, q_others)) - mismatch(preference, q_expert)
+=======
+    margin = mismatch(preference, q_expert) - mean(mismatch(preference, q_others))
+>>>>>>> cff41faf3b3f3017f2e739027b7aa38887dbd1ff
     where mismatch = ||preference/|preference| - q/|q|||^2
 
 Where:
@@ -19,7 +23,11 @@ Where:
     - q_expert: Q-values for expert action
     - q_others: Q-values for all other actions
 
+<<<<<<< HEAD
 The margin is positive when the expert action is better aligned with the preference.
+=======
+The margin is negative when the expert action is better aligned with the preference.
+>>>>>>> cff41faf3b3f3017f2e739027b7aa38887dbd1ff
 
 Implements three approaches:
 1. Particle Filter: Non-parametric sequential Monte Carlo
