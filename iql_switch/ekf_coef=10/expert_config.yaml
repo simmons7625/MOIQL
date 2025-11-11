@@ -1,0 +1,25 @@
+batch_size: 256
+clip_epsilon: 0.1
+contenous_decay: 0.02
+device: cuda
+ent_coef: 0.01
+env_name: deep_sea_treasure
+gae_lambda: 0.95
+gamma: 0.99
+hidden_dim: 256
+init_weight:
+- 1.0
+- 0.0
+local_obs_size: 5
+lr: 0.0001
+max_grad_norm: 0.5
+max_num_treasure: 3
+max_timesteps: null
+n_epochs: 5
+n_rollouts_per_update: 100
+n_updates: 1000
+save_dir: dst_train
+switching_factor: 0.8
+use_discontinuous_decay: true
+use_local_obs: true
+vf_coef: 0.5

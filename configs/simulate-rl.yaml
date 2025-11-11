@@ -1,11 +1,11 @@
 # Simulation configuration for trajectory collection
 # Model settings
-train_dir: "dst_train/20251031_134352/"  # Path to trained model directory
+train_dir: "dst_train/20251108_171856/"  # Path to trained model directory
 model_path: 'final_model.pt'  # Filename of the trained model
 training_config: "config.yaml"  # Path to training config (for environment setup)
 
 # Simulation settings
-n_episodes: 100  # Number of episodes to simulate
+n_episodes: 1000  # Number of episodes to simulate
 max_episode_steps: null  # Max timesteps per episode. null means no limit use done signal only
 deterministic: false  # Use deterministic policy (argmax) vs stochastic (sampling)
 render: false  # Enable pygame rendering to watch episodes (set to true to visualize)
