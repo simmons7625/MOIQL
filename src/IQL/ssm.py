@@ -10,24 +10,17 @@ For preference weight estimation:
     h_t: preference weights
     g: mismatch margin function
 
-Mismatch margin function:
-<<<<<<< HEAD
-    margin = mean(mismatch(preference, q_others)) - mismatch(preference, q_expert)
-=======
-    margin = mismatch(preference, q_expert) - mean(mismatch(preference, q_others))
->>>>>>> cff41faf3b3f3017f2e739027b7aa38887dbd1ff
+Mismatch margin function (expectation-based):
+    margin = sum(softmax(Q) * mismatch) - mismatch(preference, q_expert)
     where mismatch = ||preference/|preference| - q/|q|||^2
+    and softmax(Q) is computed over scalarized Q-values using current preference
 
 Where:
     - preference: h_t (preference weights)
+    - Q: All action Q-values [n_actions, n_objectives]
     - q_expert: Q-values for expert action
-    - q_others: Q-values for all other actions
 
-<<<<<<< HEAD
-The margin is positive when the expert action is better aligned with the preference.
-=======
-The margin is negative when the expert action is better aligned with the preference.
->>>>>>> cff41faf3b3f3017f2e739027b7aa38887dbd1ff
+Higher margin is better (expert has lower mismatch than expected mismatch).
 
 Implements three approaches:
 1. Particle Filter: Non-parametric sequential Monte Carlo
@@ -265,9 +258,6 @@ class ParticleFilter(StateSpaceModel):
             self.particles / particle_norms
         )  # [n_particles, n_objectives]
 
-        # Compute mismatch for all actions and all particles (vectorized)
-        n_actions = q_values_all.shape[0]
-
         # Normalize all Q-values [n_actions, n_objectives]
         q_norms = (
             np.linalg.norm(q_values_all, axis=1, keepdims=True) + EPS
@@ -283,24 +273,34 @@ class ParticleFilter(StateSpaceModel):
         )  # [n_particles, n_actions, n_objectives]
         all_mismatches = np.sum(diff**2, axis=2)  # [n_particles, n_actions]
 
-        # Create mask for other actions (exclude expert)
-        mask = np.ones(n_actions, dtype=bool)
-        mask[expert_action] = False
+        # Compute scalarized Q-values for each particle using dot product
+        # particles (preferences): [n_particles, n_objectives]
+        # q_values_all: [n_actions, n_objectives]
+        scalarized_q = self.particles @ q_values_all.T  # [n_particles, n_actions]
 
-        # Mean over other actions
-        other_mismatches_mean = np.mean(
-            all_mismatches[:, mask], axis=1
+        # Compute softmax over actions for each particle
+        # Use temperature for softmax
+        softmax_logits = scalarized_q / self.observation_noise
+        softmax_probs = np.exp(
+            softmax_logits - np.max(softmax_logits, axis=1, keepdims=True)
+        )
+        softmax_probs = softmax_probs / (
+            np.sum(softmax_probs, axis=1, keepdims=True) + EPS
+        )  # [n_particles, n_actions]
+
+        # Compute expected mismatch: sum(softmax(Q) * mismatch)
+        expected_mismatches = np.sum(
+            softmax_probs * all_mismatches, axis=1
         )  # [n_particles]
 
         # Mismatch with expert action
         expert_mismatches = all_mismatches[:, expert_action]  # [n_particles]
 
-        # Mismatch margin: positive margin means expert is better aligned
-        # margin = mean(mismatch(others)) - mismatch(expert)
-        # Higher margin is better (expert has lower mismatch than others)
-        mismatch_margins = other_mismatches_mean - expert_mismatches  # [n_particles]
+        # Compute mismatch margin: expected_mismatch - expert_mismatch
+        # Higher margin is better (expert has lower mismatch than expected)
+        mismatch_margins = expected_mismatches - expert_mismatches  # [n_particles]
 
-        # Convert margins to fitness (higher margin is better)
+        # Fitness: higher margin is better
         fitness = np.exp(mismatch_margins / self.observation_noise)
 
         # Update weights with fitness
@@ -368,7 +368,8 @@ class ExtendedKalmanFilter(StateSpaceModel):
         """
         Observation model: h(x) = mismatch margin (scalar).
 
-        Computes mean(mismatch(preference, q_others)) - mismatch(preference, q_expert)
+        Computes expectation-based mismatch margin.
+        margin = sum(softmax(Q) * mismatch) - mismatch(preference, q_expert)
 
         Args:
             x: Logits [n_objectives]
@@ -376,7 +377,7 @@ class ExtendedKalmanFilter(StateSpaceModel):
             q_values_all: All Q-values [n_actions, n_objectives]
 
         Returns:
-            Mismatch margin (scalar) - positive when expert is better aligned
+            Mismatch margin (scalar) - higher is better (expert outperforms expected)
         """
         w = self.f(x)  # softmax to get preference weights
         w_norm = np.linalg.norm(w) + self._eps
@@ -395,11 +396,26 @@ class ExtendedKalmanFilter(StateSpaceModel):
             w_normalized[np.newaxis, :] - q_normalized_all
         )  # [n_actions, n_objectives]
         all_mismatches = np.sum(diff**2, axis=1)  # [n_actions]
-        all_mismatches_mean = np.mean(all_mismatches)
+
+        # Compute scalarized Q-values using preference weights
+        scalarized_q = q_values_all @ w  # [n_actions]
+
+        # Compute softmax over actions
+        softmax_logits = scalarized_q / self.observation_noise
+        softmax_probs = np.exp(softmax_logits - np.max(softmax_logits))
+        softmax_probs = softmax_probs / (
+            np.sum(softmax_probs) + self._eps
+        )  # [n_actions]
+
+        # Compute expected mismatch: sum(softmax(Q) * mismatch)
+        expected_mismatch = np.sum(softmax_probs * all_mismatches)
+
+        # Expert mismatch
         expert_mismatch = all_mismatches[expert_action]
 
-        # Return margin (higher is better - expert has lower mismatch than others)
-        return all_mismatches_mean - expert_mismatch
+        # Margin: expected_mismatch - expert_mismatch
+        # Higher is better (expert has lower mismatch than expected)
+        return expected_mismatch - expert_mismatch
 
     def jacobian(self, func, x: np.ndarray, *args) -> np.ndarray:
         """
