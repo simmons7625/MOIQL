@@ -324,8 +324,8 @@ def train(config: Dict[str, Any]):
     print("STARTING TRAINING")
     print("=" * 70)
 
-    n_epochs = iql_config.get("n_epochs", 100)
-    batch_size = iql_config.get("batch_size", 256)
+    n_updates = iql_config.get("n_updates", 100)
+    save_step = config.get("save_step", 1000)
 
     # Metrics tracking
     import csv
@@ -334,22 +334,23 @@ def train(config: Dict[str, Any]):
     train_csv_writer = None
     train_csv_file = None
 
-    # Track best cross-entropy for model saving
-    best_cross_entropy = float("inf")
-    best_model_path = results_dir / "best_model.pt"
+    # Create checkpoints directory
+    checkpoints_dir = results_dir / "checkpoints"
+    checkpoints_dir.mkdir(exist_ok=True)
 
-    predicted_prefs = None  # Will be initialized in first epoch
-    for epoch in tqdm(range(n_epochs), desc="Training Epochs"):
-        # Train for one epoch
-        train_metrics, predicted_prefs = trainer.train(
-            expert_trajectories,
-            batch_size=batch_size,
-            predicted_preferences=predicted_prefs,
-        )
+    # Trajectory-wise training
+    n_trajectories = len(expert_trajectories)
+    for update in tqdm(range(n_updates), desc="Training Updates"):
+        # Select trajectory (cycle through trajectories)
+        traj_idx = update % n_trajectories
+        traj = expert_trajectories[traj_idx]
+
+        # Train on single trajectory
+        train_metrics = trainer.train(traj)
 
         # Log training metrics
         train_log = {
-            "epoch": epoch + 1,
+            "update": update + 1,
             "train_loss": train_metrics["loss"],
             "train_preference_mae": train_metrics["preference_mae"],
             "train_cross_entropy": train_metrics["cross_entropy"],
@@ -367,11 +368,11 @@ def train(config: Dict[str, Any]):
         train_csv_writer.writerow(train_log)
         train_csv_file.flush()
 
-        # Save model if cross-entropy improved
-        current_cross_entropy = train_metrics["cross_entropy"]
-        if current_cross_entropy < best_cross_entropy:
-            best_cross_entropy = current_cross_entropy
-            trainer.save(str(best_model_path))
+        # Save checkpoint at regular intervals
+        if (update + 1) % save_step == 0:
+            checkpoint_path = checkpoints_dir / f"model_update_{update + 1}.pt"
+            trainer.save(str(checkpoint_path))
+            print(f"\nSaved checkpoint at update {update + 1} to {checkpoint_path}")
 
         # Log to wandb
         if config.get("use_wandb", False):
@@ -379,21 +380,14 @@ def train(config: Dict[str, Any]):
                 "train/loss": train_metrics["loss"],
                 "train/preference_mae": train_metrics["preference_mae"],
                 "train/cross_entropy": train_metrics["cross_entropy"],
-                "train/best_cross_entropy": best_cross_entropy,
             }
-            wandb.log(wandb_log, step=epoch + 1)
+            wandb.log(wandb_log, step=update + 1)
 
     # Close CSV files
     if train_csv_file is not None:
         train_csv_file.close()
 
-    # Save final model
-    final_model_path = results_dir / "final_model.pt"
-    trainer.save(str(final_model_path))
-    print(f"\nFinal model saved to: {final_model_path}")
-    print(
-        f"Best model (cross-entropy={best_cross_entropy:.6f}) saved to: {best_model_path}"
-    )
+    print(f"\nTraining completed. Checkpoints saved to: {checkpoints_dir}")
 
     if config.get("use_wandb", False):
         wandb.finish()

@@ -197,9 +197,9 @@ class DeepSeaTreasureWrapper(gym.Wrapper):
             obs = self._get_local_observation(current_pos)
 
         # Termination logic:
-        # Episode terminates when timestep > 0 and agent is at position (0, 0)
+        # Episode terminates when agent collects max_num_treasure treasures
         terminated = False
-        if self.timestep > 0 and np.array_equal(current_pos, np.array([0, 0])):
+        if self.collected_treasures >= self.max_num_treasure:
             terminated = True
 
         # Check if max timestep is reached

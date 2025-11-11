@@ -101,6 +101,8 @@ def main():
     trainer = PPOTrainer(
         contenous_decay=config["contenous_decay"],
         init_treasure_weight=init_weight,
+        use_discontinuous_decay=config.get("use_discontinuous_decay", False),
+        switching_factor=config.get("switching_factor", 0.5),
         hidden_dim=config["hidden_dim"],
         lr=config["lr"],
         gamma=config["gamma"],

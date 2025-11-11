@@ -22,6 +22,8 @@ class PPOTrainer:
         self,
         contenous_decay: float = 0.01,
         init_treasure_weight: float = 1.0,
+        use_discontinuous_decay: bool = False,
+        switching_factor: float = 0.5,
         hidden_dim: int = 256,
         lr: float = 3e-4,
         gamma: float = 0.99,
@@ -44,8 +46,10 @@ class PPOTrainer:
         Initialize PPO trainer for Deep Sea Treasure environment.
 
         Args:
-            contenous_decay: Continuous linear decay rate for preference weight
+            contenous_decay: Continuous linear decay rate for preference weight (used if use_discontinuous_decay=False)
             init_treasure_weight: Initial weight for treasure objective
+            use_discontinuous_decay: Use discontinuous decay on treasure collection instead of continuous
+            switching_factor: Factor to multiply treasure preference when treasure is collected
             hidden_dim: Hidden dimension for networks
             lr: Learning rate
             gamma: Discount factor
@@ -72,6 +76,8 @@ class PPOTrainer:
         preference_fn = DSTPreferenceFunction(
             contenous_decay=contenous_decay,
             init_treasure_weight=init_treasure_weight,
+            use_discontinuous_decay=use_discontinuous_decay,
+            switching_factor=switching_factor,
         )
         reward_fn = RewardFunction(preference_fn=preference_fn)
 

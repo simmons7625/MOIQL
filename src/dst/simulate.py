@@ -141,6 +141,8 @@ def load_model(
 def create_environment(
     contenous_decay: float,
     init_weight: float,
+    use_discontinuous_decay: bool = False,
+    switching_factor: float = 0.5,
     max_timesteps: int = None,
     max_num_treasure: int = 1,
     use_local_obs: bool = True,
@@ -153,6 +155,8 @@ def create_environment(
     preference_fn = DSTPreferenceFunction(
         contenous_decay=contenous_decay,
         init_treasure_weight=init_weight,
+        use_discontinuous_decay=use_discontinuous_decay,
+        switching_factor=switching_factor,
     )
     reward_fn = RewardFunction(preference_fn=preference_fn)
 
@@ -329,6 +333,8 @@ def simulate(config: dict):
     env, reward_fn = create_environment(
         contenous_decay=training_config["contenous_decay"],
         init_weight=init_weight,
+        use_discontinuous_decay=training_config.get("use_discontinuous_decay", False),
+        switching_factor=training_config.get("switching_factor", 0.5),
         max_timesteps=training_config.get("max_timesteps"),
         max_num_treasure=training_config.get("max_num_treasure", 1),
         use_local_obs=training_config.get("use_local_obs", True),
